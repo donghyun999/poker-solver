@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["engine", "cli", "learning/kuhn"]
+members = ["engine", "cli", "learning/kuhn", "app/src-tauri"]
 
 [workspace.package]
 edition = "2024"
@@ -8,6 +8,14 @@ version = "0.1.0"
 
 # 테스트도 최적화해서 빌드 (솔버 테스트는 최적화 없으면 수십 배 느림)
 [profile.test]
+opt-level = 3
+
+# 앱 개발 모드(npm run tauri dev)에서도 엔진은 최적화
+[profile.dev.package.engine]
+opt-level = 3
+[profile.dev.package.rayon]
+opt-level = 3
+[profile.dev.package.rayon-core]
 opt-level = 3
 
 [profile.release]

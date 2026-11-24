@@ -31,7 +31,25 @@ python learning/kuhn_cfr.py
 cargo run --release -p kuhn
 ```
 
-플랍은 메모리를 많이 씁니다 (턴/리버 사이즈 1개씩이어도 약 6GB, 3분). 예: `--board "Kh 9d 4c" --pot 6 --stack 97 --bet 33,75 --turn-bet 75 --river-bet 75 --max-raises 1`
+플랍은 메모리를 많이 씁니다. `--compress`를 붙이면 절반 (아래 예시: 6.4GB → 3.2GB, 약 3~4분). 풀어둔 건 `--save`로 저장하고 `--load`로 바로 열 수 있습니다.
+
+```powershell
+cargo run --release -p cli -- --board "Kh 9d 4c" --pot 6 --stack 97 --bet 33,75 --turn-bet 75 --river-bet 75 --max-raises 1 --compress --save k94.pks --oop "<OOP 레인지>" --ip "<IP 레인지>"
+cargo run --release -p cli -- --load k94.pks --line 0
+```
+
+### 데스크탑 앱
+
+준비: Node.js (https://nodejs.org)
+
+```powershell
+cd app
+npm install
+npm run tauri dev        # 개발 모드 (처음엔 빌드 몇 분)
+npx tauri build          # 설치 파일 만들기 → target/release/bundle/
+```
+
+화면: 왼쪽에서 보드·레인지·벳 사이즈 설정 → **솔브** → 오른쪽에서 액션 버튼을 눌러 트리를 내려가며 13×13 그리드로 핸드별 전략 확인. 결과 저장/불러오기 가능.
 
 엔진 설계·구현 현황·성능 기록: [docs/DESIGN.md](docs/DESIGN.md)
 

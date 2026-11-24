@@ -43,6 +43,8 @@ struct ShowdownData {
 
 /// 트리 + 레인지 + 쇼다운 정보. 한 번 만들면 바뀌지 않는다.
 pub struct Game {
+    /// 이 게임을 만든 설정 (저장/불러오기에 사용)
+    pub config: SolveConfig,
     pub tree: Tree,
     /// 플레이어별 콤보 목록 (보드와 겹치거나 가중치 0인 콤보는 제외)
     pub hands: [Vec<(Card, Card)>; 2],
@@ -140,16 +142,21 @@ impl Game {
             })
             .collect();
 
-        Ok(Game { tree, hands, init_weights, same_hand, showdowns, storage_len: offset })
+        Ok(Game { config: cfg.clone(), tree, hands, init_weights, same_hand, showdowns, storage_len: offset })
     }
 
     pub fn starting_pot(&self) -> f64 {
         self.tree.config.starting_pot
     }
 
-    /// regret + 누적 전략 저장에 필요한 메모리 (바이트)
-    pub fn memory_bytes(&self) -> usize {
-        self.storage_len * 2 * std::mem::size_of::<f32>()
+    /// regret + 누적 전략 저장에 필요한 메모리 (바이트).
+    /// compressed = 16비트 압축 (절반 크기 + 노드별 스케일)
+    pub fn memory_bytes(&self, compressed: bool) -> usize {
+        if compressed {
+            self.storage_len * 2 * 2 + self.tree.nodes.len() * 2 * 4
+        } else {
+            self.storage_len * 2 * 4
+        }
     }
 
     /// 상대 reach의 합과 카드별 합 (카드 겹침 계산용)
@@ -309,26 +316,150 @@ fn discount(t: u32) -> Discount {
 }
 
 /// 병렬 순회 중 노드별로 겹치지 않는 구간에 쓰기 위한 포인터
-#[derive(Clone, Copy)]
-struct Ptr(*mut f32);
-// SAFETY: 트리의 각 액션 노드는 저장소에서 겹치지 않는 구간 [offset, offset+len)을 갖고,
-// 한 번의 순회에서 각 노드는 정확히 한 번만 방문된다. 병렬화는 서로 다른 하위 트리
-// (찬스 노드의 자식들)로만 나뉘므로 같은 구간을 동시에 쓰는 일이 없다.
-unsafe impl Send for Ptr {}
-unsafe impl Sync for Ptr {}
+struct Ptr<T>(*mut T);
+impl<T> Clone for Ptr<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for Ptr<T> {}
+// SAFETY: 트리의 각 액션 노드는 저장소에서 겹치지 않는 구간 [offset, offset+len)과
+// 자기 노드 번호의 스케일 칸을 갖고, 한 번의 순회에서 각 노드는 정확히 한 번만 방문된다.
+// 병렬화는 서로 다른 하위 트리(찬스 노드의 자식들)로만 나뉘므로 같은 곳을 동시에 쓰는 일이 없다.
+unsafe impl<T: Send> Send for Ptr<T> {}
+unsafe impl<T: Send> Sync for Ptr<T> {}
 
-impl Ptr {
+impl<T> Ptr<T> {
     /// SAFETY: 호출자는 이 구간을 동시에 다른 곳에서 쓰지 않음을 보장해야 한다.
     #[allow(clippy::mut_from_ref)]
-    unsafe fn slice<'a>(self, off: usize, len: usize) -> &'a mut [f32] {
+    unsafe fn slice<'a>(self, off: usize, len: usize) -> &'a mut [T] {
         unsafe { std::slice::from_raw_parts_mut(self.0.add(off), len) }
+    }
+}
+
+/// regret / 누적 전략 저장소.
+/// - F32: 그대로 저장
+/// - C16: 16비트 정수 + 노드별 스케일(최댓값). 메모리 절반, 정밀도 약간 손해
+pub(crate) enum Storage {
+    F32 { regrets: Vec<f32>, strat: Vec<f32> },
+    C16 { regrets: Vec<i16>, strat: Vec<u16>, rscale: Vec<f32>, sscale: Vec<f32> },
+}
+
+impl Storage {
+    pub(crate) fn new(len: usize, num_nodes: usize, compressed: bool) -> Storage {
+        if compressed {
+            Storage::C16 {
+                regrets: vec![0; len],
+                strat: vec![0; len],
+                rscale: vec![0.0; num_nodes],
+                sscale: vec![0.0; num_nodes],
+            }
+        } else {
+            Storage::F32 { regrets: vec![0.0; len], strat: vec![0.0; len] }
+        }
+    }
+
+    pub(crate) fn is_compressed(&self) -> bool {
+        matches!(self, Storage::C16 { .. })
+    }
+
+    fn view(&mut self) -> View {
+        match self {
+            Storage::F32 { regrets, strat } => View::F32 { regrets: Ptr(regrets.as_mut_ptr()), strat: Ptr(strat.as_mut_ptr()) },
+            Storage::C16 { regrets, strat, rscale, sscale } => View::C16 {
+                regrets: Ptr(regrets.as_mut_ptr()),
+                strat: Ptr(strat.as_mut_ptr()),
+                rscale: Ptr(rscale.as_mut_ptr()),
+                sscale: Ptr(sscale.as_mut_ptr()),
+            },
+        }
+    }
+
+    /// 읽기 전용 뷰. 반환된 뷰로는 load만 호출해야 한다.
+    fn view_ro(&self) -> View {
+        match self {
+            Storage::F32 { regrets, strat } => View::F32 {
+                regrets: Ptr(regrets.as_ptr() as *mut f32),
+                strat: Ptr(strat.as_ptr() as *mut f32),
+            },
+            Storage::C16 { regrets, strat, rscale, sscale } => View::C16 {
+                regrets: Ptr(regrets.as_ptr() as *mut i16),
+                strat: Ptr(strat.as_ptr() as *mut u16),
+                rscale: Ptr(rscale.as_ptr() as *mut f32),
+                sscale: Ptr(sscale.as_ptr() as *mut f32),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum View {
+    F32 { regrets: Ptr<f32>, strat: Ptr<f32> },
+    C16 { regrets: Ptr<i16>, strat: Ptr<u16>, rscale: Ptr<f32>, sscale: Ptr<f32> },
+}
+
+impl View {
+    /// SAFETY: 노드 id의 구간을 동시에 쓰는 곳이 없어야 한다 (Ptr 참고)
+    unsafe fn load_regrets(self, id: u32, off: usize, len: usize) -> Vec<f32> {
+        unsafe {
+            match self {
+                View::F32 { regrets, .. } => regrets.slice(off, len).to_vec(),
+                View::C16 { regrets, rscale, .. } => {
+                    let sc = rscale.slice(id as usize, 1)[0] / i16::MAX as f32;
+                    regrets.slice(off, len).iter().map(|&q| q as f32 * sc).collect()
+                }
+            }
+        }
+    }
+
+    unsafe fn save_regrets(self, id: u32, off: usize, v: &[f32]) {
+        unsafe {
+            match self {
+                View::F32 { regrets, .. } => regrets.slice(off, v.len()).copy_from_slice(v),
+                View::C16 { regrets, rscale, .. } => {
+                    let m = v.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
+                    rscale.slice(id as usize, 1)[0] = m;
+                    let inv = if m > 0.0 { i16::MAX as f32 / m } else { 0.0 };
+                    for (q, &x) in regrets.slice(off, v.len()).iter_mut().zip(v) {
+                        *q = (x * inv).round() as i16;
+                    }
+                }
+            }
+        }
+    }
+
+    unsafe fn load_strat(self, id: u32, off: usize, len: usize) -> Vec<f32> {
+        unsafe {
+            match self {
+                View::F32 { strat, .. } => strat.slice(off, len).to_vec(),
+                View::C16 { strat, sscale, .. } => {
+                    let sc = sscale.slice(id as usize, 1)[0] / u16::MAX as f32;
+                    strat.slice(off, len).iter().map(|&q| q as f32 * sc).collect()
+                }
+            }
+        }
+    }
+
+    unsafe fn save_strat(self, id: u32, off: usize, v: &[f32]) {
+        unsafe {
+            match self {
+                View::F32 { strat, .. } => strat.slice(off, v.len()).copy_from_slice(v),
+                View::C16 { strat, sscale, .. } => {
+                    let m = v.iter().fold(0.0f32, |m, &x| m.max(x));
+                    sscale.slice(id as usize, 1)[0] = m;
+                    let inv = if m > 0.0 { u16::MAX as f32 / m } else { 0.0 };
+                    for (q, &x) in strat.slice(off, v.len()).iter_mut().zip(v) {
+                        *q = (x * inv).round() as u16;
+                    }
+                }
+            }
+        }
     }
 }
 
 struct Ctx<'a> {
     game: &'a Game,
-    regrets: Ptr,
-    strat_sum: Ptr,
+    store: View,
     d: Discount,
     /// 이번 순회에서 regret을 업데이트하는 플레이어
     player: usize,
@@ -362,7 +493,8 @@ fn cfr(ctx: &Ctx, id: u32, reach: &[f32]) -> Vec<f32> {
             let n = g.hands[p].len();
             let k = node.actions.len();
             // SAFETY: 이 노드의 구간은 이 순회에서 여기서만 접근
-            let strategy = regret_matching(unsafe { ctx.regrets.slice(node.data_offset, k * n) }, k, n);
+            let mut regrets = unsafe { ctx.store.load_regrets(id, node.data_offset, k * n) };
+            let strategy = regret_matching(&regrets, k, n);
             let child_vals: Vec<Vec<f32>> = node.children.iter().map(|&c| cfr(ctx, c, reach)).collect();
 
             let mut ev = vec![0.0f32; n];
@@ -371,7 +503,6 @@ fn cfr(ctx: &Ctx, id: u32, reach: &[f32]) -> Vec<f32> {
                     ev[h] += strategy[a * n + h] * child_vals[a][h];
                 }
             }
-            let regrets = unsafe { ctx.regrets.slice(node.data_offset, k * n) };
             for a in 0..k {
                 for h in 0..n {
                     let i = a * n + h;
@@ -380,20 +511,23 @@ fn cfr(ctx: &Ctx, id: u32, reach: &[f32]) -> Vec<f32> {
                     regrets[i] = r * disc + (child_vals[a][h] - ev[h]);
                 }
             }
+            unsafe { ctx.store.save_regrets(id, node.data_offset, &regrets) };
             ev
         }
         NodeKind::Action => {
             // 상대 노드: 상대 전략으로 reach를 나눠 내려보내고, 상대의 평균 전략을 누적
             let n = g.hands[o].len();
             let k = node.actions.len();
-            let strategy = regret_matching(unsafe { ctx.regrets.slice(node.data_offset, k * n) }, k, n);
-            let ss = unsafe { ctx.strat_sum.slice(node.data_offset, k * n) };
+            let regrets = unsafe { ctx.store.load_regrets(id, node.data_offset, k * n) };
+            let strategy = regret_matching(&regrets, k, n);
+            let mut ss = unsafe { ctx.store.load_strat(id, node.data_offset, k * n) };
             for a in 0..k {
                 for h in 0..n {
                     let i = a * n + h;
                     ss[i] = ss[i] * ctx.d.strat + strategy[i] * reach[h];
                 }
             }
+            unsafe { ctx.store.save_strat(id, node.data_offset, &ss) };
             let mut out = vec![0.0f32; g.hands[p].len()];
             for (a, &child) in node.children.iter().enumerate() {
                 let r: Vec<f32> = (0..n).map(|h| reach[h] * strategy[a * n + h]).collect();
@@ -435,8 +569,7 @@ pub struct Progress {
 
 pub struct Solver {
     pub game: Game,
-    regrets: Vec<f32>,
-    strat_sum: Vec<f32>,
+    pub(crate) storage: Storage,
     pub iteration: u32,
 }
 
@@ -451,21 +584,25 @@ pub enum Step {
 
 impl Solver {
     pub fn new(game: Game) -> Solver {
-        let len = game.storage_len;
-        Solver { game, regrets: vec![0.0; len], strat_sum: vec![0.0; len], iteration: 0 }
+        Self::with_compression(game, false)
+    }
+
+    /// compressed = true면 16비트 압축 저장 (메모리 약 절반)
+    pub fn with_compression(game: Game, compressed: bool) -> Solver {
+        let storage = Storage::new(game.storage_len, game.tree.nodes.len(), compressed);
+        Solver { game, storage, iteration: 0 }
+    }
+
+    pub fn is_compressed(&self) -> bool {
+        self.storage.is_compressed()
     }
 
     /// DCFR 1회 반복 (양 플레이어 번갈아 업데이트)
     pub fn iterate(&mut self) {
         let t = self.iteration + 1;
+        let store = self.storage.view();
         for p in 0..2 {
-            let ctx = Ctx {
-                game: &self.game,
-                regrets: Ptr(self.regrets.as_mut_ptr()),
-                strat_sum: Ptr(self.strat_sum.as_mut_ptr()),
-                d: discount(t),
-                player: p,
-            };
+            let ctx = Ctx { game: &self.game, store, d: discount(t), player: p };
             cfr(&ctx, self.game.tree.root(), &self.game.init_weights[1 - p]);
         }
         self.iteration = t;
@@ -505,7 +642,8 @@ impl Solver {
         assert_eq!(node.kind, NodeKind::Action);
         let k = node.actions.len();
         let n = self.game.hands[node.player as usize].len();
-        let mut s = self.strat_sum[node.data_offset..node.data_offset + k * n].to_vec();
+        // SAFETY: &self라 동시에 쓰는 곳이 없음
+        let mut s = unsafe { self.storage.view_ro().load_strat(id, node.data_offset, k * n) };
         normalize_columns(&mut s, k, n);
         s
     }
@@ -726,6 +864,35 @@ mod tests {
         assert!(prev < 0.5, "500회 후 익스플로이터빌리티 {prev}%");
         let ev = s.expected_values();
         assert!((ev[0] + ev[1] - 10.0).abs() < 1e-2, "EV 합 {}", ev[0] + ev[1]);
+    }
+
+    /// 16비트 압축: 결과가 압축 안 한 것과 거의 같고, 수렴도 하는지
+    #[test]
+    fn compressed_storage_matches_f32() {
+        let tree = TreeConfig::uniform(10.0, 50.0, &[0.5, 1.0], &[1.0]);
+        let cfg = config(
+            "Ks 9d 5c 3h",
+            "AA,KK,99,55,AK,KQ,KJs,QJs,JTs,T9s,98s,87s,76s,A5s,A4s",
+            "QQ-TT,88-66,AK,AQ,KQ,KJ,K9s,Q9s,J9s,T9s,98s,A5s,65s,54s",
+            tree,
+        );
+        let mut f = Solver::with_compression(Game::new(&cfg).unwrap(), false);
+        let mut c = Solver::with_compression(Game::new(&cfg).unwrap(), true);
+        for _ in 0..300 {
+            f.iterate();
+            c.iterate();
+        }
+        let (ef, ec) = (f.exploitability(), c.exploitability());
+        assert!(ec < 0.5, "압축 익스플로이터빌리티 {ec}% (f32 {ef}%)");
+        let (sf, sc) = (f.strategy(0), c.strategy(0));
+        let w = &f.game.init_weights[0];
+        let n = w.len();
+        let total: f32 = w.iter().sum();
+        for a in 0..sf.len() / n {
+            let freq = |s: &[f32]| (0..n).map(|h| w[h] * s[a * n + h]).sum::<f32>() / total;
+            assert!((freq(&sf) - freq(&sc)).abs() < 0.03, "액션 {a}: {} vs {}", freq(&sf), freq(&sc));
+        }
+        assert!(c.game.memory_bytes(true) < f.game.memory_bytes(false) * 6 / 10);
     }
 
     /// 찬스 노드 검증: 턴에서 체크-체크만 가능하면,

@@ -6,9 +6,8 @@
 //!
 //! 도움말: cargo run --release -p cli -- --help
 
-use engine::card::{card_to_string, cards_to_string, hand_class, hand_class_order, parse_card, parse_cards};
+use engine::card::{card_to_string, cards_to_string, parse_card, parse_cards};
 use engine::{Game, NodeKind, Range, SolveConfig, Solver, Step, StreetSizes, TreeConfig};
-use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 
@@ -36,6 +35,11 @@ const HELP: &str = "\
   --check-every <n>   익스플로이터빌리티 계산 간격 (기본 10)
   --threads <n>       스레드 수 (기본: 전체 코어)
   --max-mem <GB>      메모리 상한 (기본 8)
+  --compress          16비트 압축 저장 (메모리 약 절반, 플랍 추천)
+
+저장/불러오기
+  --save <파일>       솔브 결과를 파일로 저장
+  --load <파일>       저장한 결과를 불러와서 바로 조회 (솔브 안 함, 보드·레인지 불필요)
 
 결과 보기
   --line <경로>       루트에서 내려갈 경로. 액션 번호와 카드를 쉼표로.
@@ -53,7 +57,7 @@ impl Args {
             let Some(name) = key.strip_prefix("--") else {
                 return Err(format!("알 수 없는 인자: {key}"));
             };
-            let flag = matches!(name, "no-allin" | "help");
+            let flag = matches!(name, "no-allin" | "help" | "compress");
             let val = if flag { String::new() } else { it.next().ok_or(format!("{key} 값이 없음"))? };
             map.insert(name.to_string(), val);
         }
@@ -126,10 +130,7 @@ fn pct(x: f64) -> String {
 }
 
 fn print_node(s: &Solver, path: &[Step]) -> Result<(), String> {
-    let g = &s.game;
-    let (id, reach) = s.walk(path)?;
-    let node = &g.tree.nodes[id as usize];
-    let board: Vec<u8> = (0..52u8).filter(|&c| node.board & (1u64 << c) != 0).collect();
+    let sum = s.summarize(path)?;
     let who = ["OOP", "IP"];
 
     println!();
@@ -142,11 +143,11 @@ fn print_node(s: &Solver, path: &[Step]) -> Result<(), String> {
         })
         .collect();
     println!("경로 : {}", if path.is_empty() { "(루트)".into() } else { path_str.join(",") });
-    println!("보드 : {}   팟 {:.2}", cards_to_string(&board), g.tree.pot(id));
+    println!("보드 : {}   팟 {:.2}", cards_to_string(&sum.board), sum.pot);
 
-    match node.kind {
+    match sum.kind {
         NodeKind::Fold => {
-            println!("종료 : {} 폴드", who[node.player as usize]);
+            println!("종료 : {} 폴드", who[sum.player as usize]);
             return Ok(());
         }
         NodeKind::Showdown => {
@@ -160,70 +161,38 @@ fn print_node(s: &Solver, path: &[Step]) -> Result<(), String> {
         NodeKind::Action => {}
     }
 
-    let p = node.player as usize;
-    let n = g.hands[p].len();
-    let k = node.actions.len();
-    let strat = s.strategy(id);
-    let r = &reach[p];
-    let evs = path.is_empty().then(|| s.root_hand_evs(p));
-
-    println!("차례 : {}", who[p]);
-    let labels: Vec<String> = node.actions.iter().map(|a| a.label()).collect();
+    println!("차례 : {}", who[sum.player as usize]);
     println!(
         "액션 : {}",
-        labels.iter().enumerate().map(|(i, l)| format!("{i}) {l}")).collect::<Vec<_>>().join("   ")
+        sum.actions.iter().enumerate().map(|(i, l)| format!("{i}) {l}")).collect::<Vec<_>>().join("   ")
     );
-
-    let total: f64 = r.iter().map(|&x| x as f64).sum();
-    if total <= 0.0 {
+    if sum.total_combos <= 0.0 {
         println!("이 노드에 도달하는 콤보가 없음");
         return Ok(());
     }
     print!("전체 :");
-    for a in 0..k {
-        let f: f64 = (0..n).map(|h| (r[h] * strat[a * n + h]) as f64).sum::<f64>() / total;
-        print!("  {} {}", labels[a], pct(f));
+    for (l, f) in sum.actions.iter().zip(&sum.overall) {
+        print!("  {} {}", l, pct(*f));
     }
-    println!("   (콤보 {total:.1})");
+    println!("   (콤보 {:.1})", sum.total_combos);
 
-    // 핸드 클래스별 집계
-    struct Row {
-        combos: f64,
-        freq: Vec<f64>,
-        ev_sum: f64,
-    }
-    let mut rows: BTreeMap<(u32, String), Row> = BTreeMap::new();
-    for (h, &(a, b)) in g.hands[p].iter().enumerate() {
-        if r[h] <= 0.0 {
-            continue;
-        }
-        let key = (hand_class_order(a, b), hand_class(a, b));
-        let row = rows.entry(key).or_insert(Row { combos: 0.0, freq: vec![0.0; k], ev_sum: 0.0 });
-        row.combos += r[h] as f64;
-        for act in 0..k {
-            row.freq[act] += (r[h] * strat[act * n + h]) as f64;
-        }
-        if let Some(e) = &evs {
-            row.ev_sum += (r[h] * e[h]) as f64;
-        }
-    }
-
+    let has_ev = sum.classes.iter().any(|c| c.ev.is_some());
     println!();
     print!("{:<6}{:>7}", "Hand", "Combos");
-    for l in &labels {
+    for l in &sum.actions {
         print!("{:>12}", l);
     }
-    if evs.is_some() {
+    if has_ev {
         print!("{:>9}", "EV");
     }
     println!();
-    for ((_, class), row) in &rows {
-        print!("{:<6}{:>7.2}", class, row.combos);
-        for f in &row.freq {
-            print!("{:>12}", pct(f / row.combos));
+    for row in &sum.classes {
+        print!("{:<6}{:>7.2}", row.class, row.combos);
+        for f in &row.freqs {
+            print!("{:>12}", pct(*f));
         }
-        if evs.is_some() {
-            print!("{:>9.2}", row.ev_sum / row.combos);
+        if let Some(ev) = row.ev {
+            print!("{:>9.2}", ev);
         }
         println!();
     }
@@ -241,10 +210,25 @@ fn run() -> Result<(), String> {
         rayon::ThreadPoolBuilder::new().num_threads(t).build_global().map_err(|e| e.to_string())?;
     }
 
-    let cfg = build_config(&args)?;
     let path = parse_line(args.get("line").unwrap_or(""))?;
-
     println!("solver engine v{}", engine::VERSION);
+
+    if let Some(file) = args.get("load") {
+        let t0 = std::time::Instant::now();
+        let solver = Solver::load(file)?;
+        let c = &solver.game.config;
+        println!(
+            "불러옴: {file}  ({:.1}초)\n보드 {}   시작팟 {}   스택 {}   반복 {}",
+            t0.elapsed().as_secs_f64(),
+            cards_to_string(&c.board),
+            c.tree.starting_pot,
+            c.tree.effective_stack,
+            solver.iteration
+        );
+        return print_node(&solver, &path);
+    }
+
+    let cfg = build_config(&args)?;
     println!(
         "보드 {}   시작팟 {}   스택 {}",
         cards_to_string(&cfg.board),
@@ -252,28 +236,32 @@ fn run() -> Result<(), String> {
         cfg.tree.effective_stack
     );
 
+    let compress = args.get("compress").is_some();
     let t0 = std::time::Instant::now();
     let game = Game::new(&cfg)?;
+    let mem = game.memory_bytes(compress) as f64;
     let t = &game.tree;
     println!(
-        "콤보 OOP {} / IP {}   트리: 액션 {} · 찬스 {} · 종료 {} 노드   메모리 {:.1} MB   (생성 {:.2}초)",
+        "콤보 OOP {} / IP {}   트리: 액션 {} · 찬스 {} · 종료 {} 노드   메모리 {:.1} MB{}   (생성 {:.2}초)",
         game.hands[0].len(),
         game.hands[1].len(),
         t.count(NodeKind::Action),
         t.count(NodeKind::Chance),
         t.count(NodeKind::Fold) + t.count(NodeKind::Showdown),
-        game.memory_bytes() as f64 / 1e6,
+        mem / 1e6,
+        if compress { " (압축)" } else { "" },
         t0.elapsed().as_secs_f64()
     );
     let max_mem: f64 = args.num("max-mem", 8.0)?;
-    if game.memory_bytes() as f64 > max_mem * 1e9 {
+    if mem > max_mem * 1e9 {
+        let hint = if compress { "" } else { " 또는 --compress" };
         return Err(format!(
-            "메모리 {:.1} GB가 상한 {max_mem} GB를 넘음. 벳 사이즈를 줄이거나 --max-mem을 올리세요",
-            game.memory_bytes() as f64 / 1e9
+            "메모리 {:.1} GB가 상한 {max_mem} GB를 넘음. 벳 사이즈를 줄이거나{hint} --max-mem을 올리세요",
+            mem / 1e9
         ));
     }
 
-    let mut solver = Solver::new(game);
+    let mut solver = Solver::with_compression(game, compress);
     let cancel = AtomicBool::new(false);
     let fin = solver.run(
         args.num("iters", 1000)?,
@@ -287,6 +275,10 @@ fn run() -> Result<(), String> {
         "완료: 반복 {}, 익스플로이터빌리티 {:.3}%, {:.1}초   EV OOP {:.3} / IP {:.3}",
         fin.iteration, fin.exploitability, fin.elapsed_secs, ev[0], ev[1]
     );
+    if let Some(file) = args.get("save") {
+        solver.save(file)?;
+        println!("저장함: {file}");
+    }
 
     print_node(&solver, &path)
 }

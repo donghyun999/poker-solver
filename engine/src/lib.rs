@@ -3,11 +3,14 @@
 
 pub mod card;
 pub mod eval;
+pub mod file;
 pub mod range;
+pub mod report;
 pub mod solver;
 pub mod tree;
 
 pub use range::Range;
+pub use report::{ClassRow, NodeSummary};
 pub use solver::{Game, Progress, SolveConfig, Solver, Step};
 pub use tree::{Action, NodeKind, StreetSizes, TreeConfig};
 
