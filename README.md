@@ -3,6 +3,38 @@
 GTO Wizard 같은 포스트플랍 솔버를 데스크탑 앱으로 만드는 프로젝트.
 2026-11-24 시작. 아래는 첫날 정리한 내용.
 
+## 0. 바로 실행해 보기
+
+준비: Rust 설치 (https://rustup.rs, Visual Studio C++ Build Tools 필요) + VS Code 확장 `rust-analyzer`
+
+```powershell
+git clone https://github.com/donghyun999/poker-solver.git
+cd poker-solver
+
+# 테스트 전부 (처음 빌드는 몇 분 걸림)
+cargo test
+
+# 리버 이론 토이 게임 — 너트 100% 벳, 블러프 37.5%, 콜 50%가 나와야 정상
+cargo run --release -p cli -- --board "Kh Qd 7c 3s 2h" --oop "77,54s" --ip "88" --bet 100 --raise "" --no-allin --max-raises 0
+
+# 위 결과에서 OOP 벳(1번 액션) 후 IP의 대응 보기
+cargo run --release -p cli -- --board "Kh Qd 7c 3s 2h" --oop "77,54s" --ip "88" --bet 100 --raise "" --no-allin --max-raises 0 --line 1
+
+# 실전 턴 스팟 (1초 안팎)
+cargo run --release -p cli -- --board "Kh 9d 4c 2s" --pot 20 --stack 87 --max-raises 1 --oop "22-JJ,A2s-AJs,K2s+,Q4s+,J6s+,T6s+,95s+,85s+,74s+,63s+,53s+,43s,A2o-AJo,K8o+,Q9o+,J9o+,T8o+,98o" --ip "22+,A2s+,K2s+,Q5s+,J7s+,T7s+,96s+,86s+,75s+,64s+,54s,A2o+,K9o+,Q9o+,J9o+,T9o"
+
+# 옵션 전체
+cargo run --release -p cli -- --help
+
+# Kuhn 포커 (학습용)
+python learning/kuhn_cfr.py
+cargo run --release -p kuhn
+```
+
+플랍은 메모리를 많이 씁니다 (턴/리버 사이즈 1개씩이어도 약 6GB, 3분). 예: `--board "Kh 9d 4c" --pot 6 --stack 97 --bet 33,75 --turn-bet 75 --river-bet 75 --max-raises 1`
+
+엔진 설계·구현 현황·성능 기록: [docs/DESIGN.md](docs/DESIGN.md)
+
 ---
 
 ## 1. 전체 구조 (결정 사항)
@@ -84,8 +116,15 @@ python learning/kuhn_cfr.py
 엔진 설계와 단계별 마일스톤: [docs/DESIGN.md](docs/DESIGN.md)
 
 - [ ] `ITER`를 100, 1000으로 줄여 돌려보기 → 반복 수에 따른 수렴 체감
-- [ ] Rust 설치 (`rustup`) 후 Kuhn CFR을 Rust로 옮기기
-- [ ] Leduc Hold'em (보드 카드 1장 추가) → 찬스 노드 개념
-- [ ] NLHE 리버 서브게임 솔버 (핸드 평가기, 레인지 파서, 트리 빌더)
-- [ ] 턴/플랍 확장 + 최적화 (수트 동형성, SIMD, rayon, 메모리 압축)
+- [x] Rust 설치 (`rustup`) 후 Kuhn CFR을 Rust로 옮기기
+- [x] NLHE 리버 솔버 (핸드 평가기, 레인지 파서, 트리 빌더, DCFR, 익스플로이터빌리티)
+- [x] 턴/플랍 확장 (찬스 노드) + 찬스 노드 병렬화
+- [ ] 외부 솔버와 결과 비교
+- [ ] 최적화 (수트 동형성, 메모리 압축)
 - [ ] Tauri로 UI 연결
+
+### 코드 읽는 순서 (추천)
+1. [engine/src/solver.rs](engine/src/solver.rs) 맨 위 주석 → `cfr()` 함수. Kuhn의 `cfr()`과 같은 구조인데 숫자 하나 대신 **콤보 벡터**를 다룸
+2. `showdown_value()` — 쇼다운을 O(n)으로 계산하는 부분
+3. 테스트 `river_toy_game_matches_theory` — 정답을 어떻게 검증하는지
+4. [engine/src/tree.rs](engine/src/tree.rs) — 벳/레이즈/올인 트리가 만들어지는 규칙
