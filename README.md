@@ -81,6 +81,8 @@ python learning/kuhn_cfr.py
   - ⚠️ AGPL 라이선스 → 상용이면 구조만 참고, 코드 복사 금지
 
 ## 8. 다음 할 일
+엔진 설계와 단계별 마일스톤: [docs/DESIGN.md](docs/DESIGN.md)
+
 - [ ] `ITER`를 100, 1000으로 줄여 돌려보기 → 반복 수에 따른 수렴 체감
 - [ ] Rust 설치 (`rustup`) 후 Kuhn CFR을 Rust로 옮기기
 - [ ] Leduc Hold'em (보드 카드 1장 추가) → 찬스 노드 개념
