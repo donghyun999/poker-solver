@@ -1,0 +1,6 @@
+[package]
+name = "kuhn"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
