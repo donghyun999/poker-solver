@@ -14,7 +14,7 @@ pub struct ClassRow {
     pub combos: f64,
     /// 액션별 빈도 (합 1)
     pub freqs: Vec<f64>,
-    /// 루트에서만: 평균 EV (칩)
+    /// 평균 EV (칩): 지금 팟에서 앞으로 가져갈 기대 칩 − 앞으로 더 넣을 칩
     pub ev: Option<f64>,
 }
 
@@ -69,7 +69,7 @@ impl Solver {
         let k = node.actions.len();
         let strat = self.strategy(id);
         let r = &reach[p];
-        let evs = path.is_empty().then(|| self.root_hand_evs(p));
+        let evs = Some(self.node_hand_evs(id, p, &reach[1 - p]));
 
         let total: f64 = r.iter().map(|&x| x as f64).sum();
         out.total_combos = total;
@@ -147,7 +147,8 @@ mod tests {
         let facing = s.summarize(&[Step::Action(1)]).unwrap();
         assert_eq!(facing.player, 1);
         assert!((facing.overall[1] - 0.5).abs() < 0.01);
-        assert!(facing.classes[0].ev.is_none(), "EV는 루트에서만");
+        // 88은 콜/폴드가 무차별 → EV ≈ 0 (폴드하면 0, 지금까지 넣은 칩 없음)
+        assert!(facing.classes[0].ev.unwrap().abs() < 0.1, "{:?}", facing.classes[0].ev);
 
         // 종료 노드
         let fold = s.summarize(&[Step::Action(1), Step::Action(0)]).unwrap();

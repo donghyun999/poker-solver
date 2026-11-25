@@ -889,13 +889,21 @@ impl Solver {
     /// 루트에서 콤보별 EV (칩). 카드가 겹치지 않는 상대 콤보 기준 평균
     pub fn root_hand_evs(&self, p: usize) -> Vec<f32> {
         let g = &self.game;
-        let reach = &g.init_weights[1 - p];
-        let v = self.traverse(g.tree.root(), p, reach, Mode::Average);
-        let (total, per_card) = g.reach_sums(1 - p, reach);
+        self.node_hand_evs(g.tree.root(), p, &g.init_weights[1 - p])
+    }
+
+    /// 노드 id에서 플레이어 p의 콤보별 EV (칩): 지금 팟에서 앞으로 가져갈 기대 칩 − 앞으로 더 넣을 칩.
+    /// opp_reach = 이 노드까지 상대 콤보별 도달 확률 (`walk` 결과, 트리 기준 순서)
+    pub fn node_hand_evs(&self, id: u32, p: usize, opp_reach: &[f32]) -> Vec<f32> {
+        let g = &self.game;
+        let v = self.traverse(id, p, opp_reach, Mode::Average);
+        let (total, per_card) = g.reach_sums(1 - p, opp_reach);
+        // 최종 손익은 '시작부터 넣은 칩'을 뺀 값이라, 이미 넣은 칩을 더해 지금 시점 기준으로
+        let invested = g.tree.nodes[id as usize].commits[p];
         (0..g.hands[p].len())
             .map(|h| {
-                let c = g.compatible(p, h, reach, total, &per_card);
-                if c > 0.0 { (v[h] as f64 / c) as f32 } else { 0.0 }
+                let c = g.compatible(p, h, opp_reach, total, &per_card);
+                if c > 0.0 { (v[h] as f64 / c + invested) as f32 } else { 0.0 }
             })
             .collect()
     }
