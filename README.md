@@ -63,7 +63,7 @@ git push origin v0.2.0
 ```
 
 - 태그와 `tauri.conf.json` 버전이 다르면 빌드가 실패합니다.
-- 이 저장소는 private이라 여기 Releases는 외부에서 못 받습니다. 공개 배포는 공개 저장소(예: `poker-solver-releases`)를 만들고 저장소 설정에 Variables `RELEASE_OWNER`, `RELEASE_REPO`와 Secret `RELEASE_TOKEN`(그 저장소 contents 쓰기 권한 PAT)을 넣으면 거기로 올라갑니다.
+- 공개 저장소라 Releases에서 누구나 받을 수 있습니다. (다른 저장소로 올리려면 Variables `RELEASE_OWNER`, `RELEASE_REPO` + Secret `RELEASE_TOKEN`)
 - 아직 코드 서명 없음 → 첫 실행 시 Windows SmartScreen / macOS Gatekeeper 경고. macOS는 ad-hoc 서명만 되어 있습니다.
 - [.github/workflows/ci.yml](.github/workflows/ci.yml): push/PR마다 엔진 테스트와 프론트 빌드.
 
