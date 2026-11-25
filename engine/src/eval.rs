@@ -190,9 +190,8 @@ mod tests {
     }
 
     /// 7장 조합 1억 3천만 개 전수 검사. 족보별 개수가 알려진 값과 일치해야 함.
-    /// 실행: cargo test -p engine --release -- --ignored
+    /// 테스트 프로필이 최적화 빌드라 몇 초면 끝나서 CI에서 매번 돈다.
     #[test]
-    #[ignore]
     fn exhaustive_7_card_counts() {
         let mut counts = [0u64; 9];
         let mut c = [0u8; 7];

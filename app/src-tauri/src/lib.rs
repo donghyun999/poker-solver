@@ -19,26 +19,16 @@ pub struct ConfigDto {
     ip_range: String,
     pot: f64,
     stack: f64,
-    /// 팟 대비 %, 쉼표 구분. 예: "33,75"
+    /// 팟 대비 %, 쉼표 구분. 예: "33,75" (해석 규칙은 engine::parse_sizes)
     flop_bet: String,
     turn_bet: String,
     river_bet: String,
-    raise: String,
+    flop_raise: String,
+    turn_raise: String,
+    river_raise: String,
     max_raises: u32,
     allow_allin: bool,
     compress: bool,
-}
-
-fn parse_sizes(s: &str) -> Result<Vec<f64>, String> {
-    s.split(',')
-        .map(str::trim)
-        .filter(|x| !x.is_empty())
-        .map(|x| x.trim_end_matches('%').parse::<f64>().map(|v| v / 100.0).map_err(|_| format!("사이즈 오류: {x}")))
-        .collect()
-}
-
-fn sizes_to_string(v: &[f64]) -> String {
-    v.iter().map(|x| format!("{}", (x * 1000.0).round() / 10.0)).collect::<Vec<_>>().join(",")
 }
 
 impl ConfigDto {
@@ -46,14 +36,12 @@ impl ConfigDto {
         let board = parse_cards(&self.board)?;
         let oop = Range::parse(&self.oop_range).map_err(|e| format!("OOP 레인지: {e}"))?;
         let ip = Range::parse(&self.ip_range).map_err(|e| format!("IP 레인지: {e}"))?;
-        let raise = parse_sizes(&self.raise)?;
-        let mut tree = TreeConfig::uniform(self.pot, self.stack, &[], &raise);
-        for (i, s) in [&self.flop_bet, &self.turn_bet, &self.river_bet].iter().enumerate() {
-            let b = parse_sizes(s)?;
-            for p in 0..2 {
-                tree.sizes[i][p].bet = b.clone();
-            }
-        }
+        let mut tree = TreeConfig::from_street_text(
+            self.pot,
+            self.stack,
+            [&self.flop_bet, &self.turn_bet, &self.river_bet],
+            [&self.flop_raise, &self.turn_raise, &self.river_raise],
+        )?;
         tree.max_raises = self.max_raises;
         tree.allow_allin = self.allow_allin;
         Ok(SolveConfig { board, ranges: [oop, ip], tree })
@@ -73,16 +61,20 @@ impl ConfigDto {
             }
             parts.join(",")
         };
+        let [(flop_bet, flop_raise), (turn_bet, turn_raise), (river_bet, river_raise)] =
+            [0, 1, 2].map(|i| c.tree.street_text(i));
         ConfigDto {
             board: c.board.iter().map(|&x| card_to_string(x)).collect::<Vec<_>>().join(" "),
             oop_range: range_str(&c.ranges[0]),
             ip_range: range_str(&c.ranges[1]),
             pot: c.tree.starting_pot,
             stack: c.tree.effective_stack,
-            flop_bet: sizes_to_string(&c.tree.sizes[0][0].bet),
-            turn_bet: sizes_to_string(&c.tree.sizes[1][0].bet),
-            river_bet: sizes_to_string(&c.tree.sizes[2][0].bet),
-            raise: sizes_to_string(&c.tree.sizes[0][0].raise),
+            flop_bet,
+            turn_bet,
+            river_bet,
+            flop_raise,
+            turn_raise,
+            river_raise,
             max_raises: c.tree.max_raises,
             allow_allin: c.tree.allow_allin,
             compress,

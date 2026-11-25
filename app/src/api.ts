@@ -11,7 +11,9 @@ export interface SolveConfig {
   flopBet: string;
   turnBet: string;
   riverBet: string;
-  raise: string;
+  flopRaise: string;
+  turnRaise: string;
+  riverRaise: string;
   maxRaises: number;
   allowAllin: boolean;
   compress: boolean;

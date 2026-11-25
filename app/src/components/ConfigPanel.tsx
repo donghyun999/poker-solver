@@ -16,7 +16,9 @@ const DEFAULT: SolveConfig = {
   flopBet: "33,75",
   turnBet: "50,100",
   riverBet: "50,100",
-  raise: "100",
+  flopRaise: "100",
+  turnRaise: "100",
+  riverRaise: "100",
   maxRaises: 1,
   allowAllin: true,
   compress: false,
@@ -138,28 +140,42 @@ export function ConfigPanel({ onSolved }: Props) {
       </div>
 
       <div className="sizes">
-        <div className="muted small">벳 사이즈 (팟 대비 %, 쉼표 구분)</div>
+        <div className="muted small">벳 · 레이즈 사이즈 (팟 대비 %, 쉼표 구분)</div>
         {street <= 3 && (
-          <label>
-            플랍
-            <input value={cfg.flopBet} onChange={(e) => set("flopBet", e.target.value)} />
-          </label>
+          <div className="row2">
+            <label>
+              플랍 벳
+              <input value={cfg.flopBet} onChange={(e) => set("flopBet", e.target.value)} />
+            </label>
+            <label>
+              플랍 레이즈
+              <input value={cfg.flopRaise} onChange={(e) => set("flopRaise", e.target.value)} />
+            </label>
+          </div>
         )}
         {street <= 4 && (
-          <label>
-            턴
-            <input value={cfg.turnBet} onChange={(e) => set("turnBet", e.target.value)} />
-          </label>
+          <div className="row2">
+            <label>
+              턴 벳
+              <input value={cfg.turnBet} onChange={(e) => set("turnBet", e.target.value)} />
+            </label>
+            <label>
+              턴 레이즈
+              <input value={cfg.turnRaise} onChange={(e) => set("turnRaise", e.target.value)} />
+            </label>
+          </div>
         )}
-        <label>
-          리버
-          <input value={cfg.riverBet} onChange={(e) => set("riverBet", e.target.value)} />
-        </label>
         <div className="row2">
           <label>
-            레이즈 %
-            <input value={cfg.raise} onChange={(e) => set("raise", e.target.value)} />
+            리버 벳
+            <input value={cfg.riverBet} onChange={(e) => set("riverBet", e.target.value)} />
           </label>
+          <label>
+            리버 레이즈
+            <input value={cfg.riverRaise} onChange={(e) => set("riverRaise", e.target.value)} />
+          </label>
+        </div>
+        <div className="row2">
           <label>
             최대 레이즈
             <input type="number" value={cfg.maxRaises} onChange={(e) => set("maxRaises", Number(e.target.value))} />
