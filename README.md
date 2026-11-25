@@ -31,7 +31,7 @@ python learning/kuhn_cfr.py
 cargo run --release -p kuhn
 ```
 
-플랍은 메모리를 많이 씁니다. `--compress`를 붙이면 절반 (아래 예시: 6.4GB → 3.2GB, 약 3~4분). 풀어둔 건 `--save`로 저장하고 `--load`로 바로 열 수 있습니다.
+플랍은 메모리를 많이 씁니다. `--compress`를 붙이면 절반 (아래 예시: 6.4GB → 3.2GB, 약 3~4분). 투톤·모노톤 보드는 수트 동형성으로 자동으로 더 줄어듭니다 (투톤 약 −40%, 끄려면 `--no-iso`). 풀어둔 건 `--save`로 저장하고 `--load`로 바로 열 수 있습니다.
 
 ```powershell
 cargo run --release -p cli -- --board "Kh 9d 4c" --pot 6 --stack 97 --bet 33,75 --turn-bet 75 --river-bet 75 --max-raises 1 --compress --save k94.pks --oop "<OOP 레인지>" --ip "<IP 레인지>"

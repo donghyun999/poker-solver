@@ -1,0 +1,10 @@
+# x86-64-v2 (SSE4.2, POPCNT): 2009년 이후 x86 CPU 전부, Windows 11 최소 사양.
+# 반올림·비트 연산·SIMD가 빨라진다. ARM(Apple Silicon)은 해당 없음.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-cpu=x86-64-v2"]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v2"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "target-cpu=x86-64-v2"]

@@ -14,7 +14,7 @@ pub struct ClassRow {
     pub combos: f64,
     /// 액션별 빈도 (합 1)
     pub freqs: Vec<f64>,
-    /// 루트에서만: 평균 EV (칩)
+    /// 평균 EV (칩): 지금 팟에서 앞으로 가져갈 기대 칩 − 앞으로 더 넣을 칩
     pub ev: Option<f64>,
 }
 
@@ -40,19 +40,25 @@ pub struct NodeSummary {
 impl Solver {
     pub fn summarize(&self, path: &[Step]) -> Result<NodeSummary, String> {
         let g = &self.game;
-        let (id, reach) = self.walk(path)?;
+        let w = self.walk_full(path)?;
+        let (id, reach) = (w.node, w.reach);
         let node = &g.tree.nodes[id as usize];
+        let board_mask = mask_of(&w.board);
         let mut out = NodeSummary {
             node: id,
             kind: node.kind,
             player: node.player,
-            board: board_cards(&g.config.board, node.board),
+            board: w.board.clone(),
             pot: g.tree.pot(id),
             actions: node.actions.iter().map(|a| a.label()).collect(),
             overall: Vec::new(),
             total_combos: 0.0,
             classes: Vec::new(),
-            dealable: if node.kind == NodeKind::Chance { node.cards.clone() } else { Vec::new() },
+            dealable: if node.kind == NodeKind::Chance {
+                (0..NUM_CARDS as Card).filter(|&c| board_mask & card_bit(c) == 0).collect()
+            } else {
+                Vec::new()
+            },
         };
         if node.kind != NodeKind::Action {
             return Ok(out);
@@ -63,7 +69,7 @@ impl Solver {
         let k = node.actions.len();
         let strat = self.strategy(id);
         let r = &reach[p];
-        let evs = path.is_empty().then(|| self.root_hand_evs(p));
+        let evs = Some(self.node_hand_evs(id, p, &reach[1 - p]));
 
         let total: f64 = r.iter().map(|&x| x as f64).sum();
         out.total_combos = total;
@@ -141,22 +147,12 @@ mod tests {
         let facing = s.summarize(&[Step::Action(1)]).unwrap();
         assert_eq!(facing.player, 1);
         assert!((facing.overall[1] - 0.5).abs() < 0.01);
-        assert!(facing.classes[0].ev.is_none(), "EV는 루트에서만");
+        // 88은 콜/폴드가 무차별 → EV ≈ 0 (폴드하면 0, 지금까지 넣은 칩 없음)
+        assert!(facing.classes[0].ev.unwrap().abs() < 0.1, "{:?}", facing.classes[0].ev);
 
         // 종료 노드
         let fold = s.summarize(&[Step::Action(1), Step::Action(0)]).unwrap();
         assert_eq!(fold.kind, NodeKind::Fold);
         assert_eq!(fold.board.len(), 5);
     }
-}
-
-/// 루트 보드 순서를 유지하고, 이후 딜된 카드를 뒤에 붙인다
-fn board_cards(root: &[Card], mask: u64) -> Vec<Card> {
-    let mut v = root.to_vec();
-    for c in 0..52u8 {
-        if mask & card_bit(c) != 0 && !root.contains(&c) {
-            v.push(c);
-        }
-    }
-    v
 }
