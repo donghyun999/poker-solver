@@ -41,10 +41,20 @@ jobs:
           run "턴 레인보우 (300회)" "Kh 9d 4c 2s" --pot 20 --stack 87 --bet 33,75 --raise 100 --max-raises 2 --iters 300 --check-every 300
           run "리버 (500회)" "Kh 9d 4c 2s 7h" --pot 40 --stack 67 --bet 33,75,150 --raise 100 --max-raises 2 --iters 500 --check-every 500
           run "투톤 플랍 압축 (20회)" "Kh 9h 4c" --pot 6 --stack 97 --bet 33,75 --turn-bet 75 --river-bet 75 --max-raises 1 --compress --max-mem 12 --iters 20 --check-every 20
+          # 수렴 곡선: 턴 스팟 100회마다 익스플로이터빌리티 (한 시점 값은 반올림 차이로 흔들릴 수 있어 곡선으로 비교)
+          for v in old new; do
+            ./$v/target/release/cli --board "Kh 9d 4c 2s" --oop "$OOP" --ip "$IP" --pot 20 --stack 87 --bet 33,75 --raise 100 --max-raises 2 --iters 1000 --check-every 100 --target 0               | grep -E "^반복" | awk '{print $2, $4}' > curve_$v.txt
+          done
           {
             echo "### 벤치마크 (main → PR, $(nproc)코어)"
             echo "| 스팟 | 빌드 | 메모리 | 시간 | 익스플로이터빌리티 | EV OOP |"
             echo "|---|---|---|---|---|---|"
             cat rows.md
+            echo
+            echo "### 턴 수렴 곡선 (익스플로이터빌리티)"
+            echo "| 반복 | main | PR |"
+            echo "|---|---|---|"
+            paste -d' ' curve_old.txt curve_new.txt | awk '{print "| " $1 " | " $2 " | " $4 " |"}'
           } >> "$GITHUB_STEP_SUMMARY"
+          paste -d' ' curve_old.txt curve_new.txt
           cat rows.md
