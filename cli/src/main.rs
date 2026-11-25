@@ -7,7 +7,7 @@
 //! 도움말: cargo run --release -p cli -- --help
 
 use engine::card::{card_to_string, cards_to_string, parse_card, parse_cards};
-use engine::{Game, NodeKind, Range, SolveConfig, Solver, Step, StreetSizes, TreeConfig};
+use engine::{Game, NodeKind, Range, SolveConfig, Solver, Step, TreeConfig};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 
@@ -81,35 +81,22 @@ impl Args {
     }
 }
 
-fn parse_sizes(s: &str) -> Result<Vec<f64>, String> {
-    s.split(',')
-        .map(str::trim)
-        .filter(|x| !x.is_empty())
-        .map(|x| x.trim_end_matches('%').parse::<f64>().map(|v| v / 100.0).map_err(|_| format!("사이즈 오류: {x}")))
-        .collect()
-}
-
 fn build_config(args: &Args) -> Result<SolveConfig, String> {
     let board = parse_cards(args.require("board")?)?;
     let oop = Range::parse(args.require("oop")?).map_err(|e| format!("OOP 레인지: {e}"))?;
     let ip = Range::parse(args.require("ip")?).map_err(|e| format!("IP 레인지: {e}"))?;
 
-    let bet = parse_sizes(args.get("bet").unwrap_or("50,100"))?;
-    let raise = parse_sizes(args.get("raise").unwrap_or("100"))?;
-    let mut tree = TreeConfig::uniform(args.num("pot", 10.0)?, args.num("stack", 100.0)?, &bet, &raise);
-    for (i, street) in ["flop", "turn", "river"].iter().enumerate() {
-        let b = args.get(&format!("{street}-bet")).map(parse_sizes).transpose()?;
-        let r = args.get(&format!("{street}-raise")).map(parse_sizes).transpose()?;
-        for p in 0..2 {
-            let s: &mut StreetSizes = &mut tree.sizes[i][p];
-            if let Some(b) = &b {
-                s.bet = b.clone();
-            }
-            if let Some(r) = &r {
-                s.raise = r.clone();
-            }
-        }
-    }
+    // 스트리트별 값이 있으면 그것, 없으면 전체 값 (--bet / --raise)
+    let per_street = |kind: &str, all: &'static str| -> [&str; 3] {
+        let all = args.get(kind).unwrap_or(all);
+        ["flop", "turn", "river"].map(|s| args.get(&format!("{s}-{kind}")).unwrap_or(all))
+    };
+    let mut tree = TreeConfig::from_street_text(
+        args.num("pot", 10.0)?,
+        args.num("stack", 100.0)?,
+        per_street("bet", "50,100"),
+        per_street("raise", "100"),
+    )?;
     tree.max_raises = args.num("max-raises", 2)?;
     tree.allow_allin = args.get("no-allin").is_none();
     Ok(SolveConfig { board, ranges: [oop, ip], tree })

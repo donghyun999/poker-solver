@@ -153,7 +153,7 @@ python learning/kuhn_cfr.py
 - [x] Rust 설치 (`rustup`) 후 Kuhn CFR을 Rust로 옮기기
 - [x] NLHE 리버 솔버 (핸드 평가기, 레인지 파서, 트리 빌더, DCFR, 익스플로이터빌리티)
 - [x] 턴/플랍 확장 (찬스 노드) + 찬스 노드 병렬화
-- [ ] 외부 솔버와 결과 비교
+- [x] 외부 솔버와 결과 비교 (postflop-solver와 EV 일치, [docs/DESIGN.md](docs/DESIGN.md) 7절)
 - [ ] 최적화 (수트 동형성, 메모리 압축)
 - [ ] Tauri로 UI 연결
 

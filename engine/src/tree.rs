@@ -73,6 +73,37 @@ impl TreeConfig {
             allow_allin: true,
         }
     }
+
+    /// 스트리트별(플랍·턴·리버) 벳·레이즈 사이즈 텍스트로 만든다. 양 플레이어 같은 사이즈.
+    /// 텍스트 형식은 [`parse_sizes`]. CLI와 앱이 같은 규칙으로 해석하도록 여기 한 곳에 둔다.
+    pub fn from_street_text(pot: f64, stack: f64, bets: [&str; 3], raises: [&str; 3]) -> Result<Self, String> {
+        let mut t = Self::uniform(pot, stack, &[], &[]);
+        for i in 0..3 {
+            let s = StreetSizes { bet: parse_sizes(bets[i])?, raise: parse_sizes(raises[i])? };
+            t.sizes[i] = [s.clone(), s];
+        }
+        Ok(t)
+    }
+
+    /// 스트리트 i(0 플랍, 1 턴, 2 리버)의 (벳, 레이즈) 텍스트. [`from_street_text`](Self::from_street_text)의 반대
+    pub fn street_text(&self, i: usize) -> (String, String) {
+        let s = &self.sizes[i][0];
+        (sizes_to_string(&s.bet), sizes_to_string(&s.raise))
+    }
+}
+
+/// 팟 대비 % 목록 텍스트 → 비율. "33,75" 또는 "33%, 75%" → [0.33, 0.75]. 빈 텍스트 = 사이즈 없음
+pub fn parse_sizes(s: &str) -> Result<Vec<f64>, String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .map(|x| x.trim_end_matches('%').trim().parse::<f64>().map(|v| v / 100.0).map_err(|_| format!("사이즈 오류: {x}")))
+        .collect()
+}
+
+/// 비율 → 팟 대비 % 텍스트 ([0.33, 0.75] → "33,75"). 소수 첫째 자리까지
+pub fn sizes_to_string(v: &[f64]) -> String {
+    v.iter().map(|x| format!("{}", (x * 1000.0).round() / 10.0)).collect::<Vec<_>>().join(",")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -371,6 +402,21 @@ impl Builder<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn size_text_roundtrip() {
+        assert_eq!(parse_sizes("33, 75%").unwrap(), vec![0.33, 0.75]);
+        assert_eq!(parse_sizes("").unwrap(), Vec::<f64>::new());
+        assert!(parse_sizes("33,abc").is_err());
+
+        // 스트리트마다 다른 레이즈가 텍스트로 그대로 되돌아와야 함 (저장 결과 → 앱 폼)
+        let t = TreeConfig::from_street_text(20.0, 87.0, ["33,75", "50,100", "75"], ["100", "", "50,150"]).unwrap();
+        assert_eq!(t.sizes[1][1].raise, Vec::<f64>::new());
+        assert_eq!(t.sizes[2][0].raise, vec![0.5, 1.5]);
+        assert_eq!(t.street_text(0), ("33,75".to_string(), "100".to_string()));
+        assert_eq!(t.street_text(1), ("50,100".to_string(), "".to_string()));
+        assert_eq!(t.street_text(2), ("75".to_string(), "50,150".to_string()));
+    }
 
     fn river_cfg() -> TreeConfig {
         let mut cfg = TreeConfig::uniform(10.0, 100.0, &[1.0], &[]);
