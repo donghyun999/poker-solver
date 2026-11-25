@@ -51,6 +51,22 @@ npx tauri build          # 설치 파일 만들기 → target/release/bundle/
 
 화면: 왼쪽에서 보드·레인지·벳 사이즈 설정 → **솔브** → 오른쪽에서 액션 버튼을 눌러 트리를 내려가며 13×13 그리드로 핸드별 전략 확인. 결과 저장/불러오기 가능.
 
+### 릴리스 (OS별 설치 파일 → GitHub Releases)
+
+[.github/workflows/release.yml](.github/workflows/release.yml)이 태그 push 때 Windows / macOS(Apple Silicon·Intel) / Linux 설치 파일을 빌드해 Release **초안**에 올립니다.
+
+```powershell
+# 1) app/src-tauri/tauri.conf.json 의 "version"을 올림 (예: 0.2.0) 후 커밋
+git tag v0.2.0
+git push origin v0.2.0
+# 2) GitHub → Releases → 초안 확인 → Publish
+```
+
+- 태그와 `tauri.conf.json` 버전이 다르면 빌드가 실패합니다.
+- 이 저장소는 private이라 여기 Releases는 외부에서 못 받습니다. 공개 배포는 공개 저장소(예: `poker-solver-releases`)를 만들고 저장소 설정에 Variables `RELEASE_OWNER`, `RELEASE_REPO`와 Secret `RELEASE_TOKEN`(그 저장소 contents 쓰기 권한 PAT)을 넣으면 거기로 올라갑니다.
+- 아직 코드 서명 없음 → 첫 실행 시 Windows SmartScreen / macOS Gatekeeper 경고. macOS는 ad-hoc 서명만 되어 있습니다.
+- [.github/workflows/ci.yml](.github/workflows/ci.yml): push/PR마다 엔진 테스트와 프론트 빌드.
+
 엔진 설계·구현 현황·성능 기록: [docs/DESIGN.md](docs/DESIGN.md)
 
 ---

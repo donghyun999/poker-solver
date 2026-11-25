@@ -1,0 +1,29 @@
+# push / PR마다 엔진 테스트 + 프론트엔드 타입체크·빌드
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # app 크레이트는 Linux에서 webkit이 필요해 제외 (release 워크플로에서 빌드됨)
+      - run: cargo test --workspace --exclude app
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - working-directory: app
+        run: npm ci && npm run build
