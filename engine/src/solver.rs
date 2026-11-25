@@ -36,9 +36,16 @@ pub struct SolveConfig {
 
 /// 리버 보드 하나에 대한 콤보별 핸드 강도
 struct ShowdownData {
-    strength: [Vec<u32>; 2],
-    /// 보드와 안 겹치는 콤보 인덱스를 강도 오름차순으로
-    order: [Vec<u32>; 2],
+    /// 플레이어별, 보드와 안 겹치는 콤보를 강도 오름차순으로 (연속 메모리로 훑기 위해 카드까지 같이 저장)
+    sorted: [Vec<SdHand>; 2],
+}
+
+#[derive(Clone, Copy)]
+struct SdHand {
+    strength: u32,
+    idx: u32,
+    c1: u8,
+    c2: u8,
 }
 
 /// 트리 + 레인지 + 쇼다운 정보. 한 번 만들면 바뀌지 않는다.
@@ -157,31 +164,22 @@ impl Game {
             .par_iter()
             .map(|&mask| {
                 let board: Vec<Card> = (0..52u8).filter(|&c| mask & card_bit(c) != 0).collect();
-                let mut data = ShowdownData { strength: Default::default(), order: Default::default() };
+                let mut data = ShowdownData { sorted: Default::default() };
+                let mut cards = board.clone();
+                cards.extend([0, 0]);
                 for p in 0..2 {
-                    let mut cards = board.clone();
-                    cards.extend([0, 0]);
-                    let strength: Vec<u32> = hands[p]
+                    let mut v: Vec<SdHand> = hands[p]
                         .iter()
-                        .map(|&(a, b)| {
-                            if mask & (card_bit(a) | card_bit(b)) != 0 {
-                                0
-                            } else {
-                                cards[5] = a;
-                                cards[6] = b;
-                                evaluate(&cards)
-                            }
+                        .enumerate()
+                        .filter(|&(_, &(a, b))| mask & (card_bit(a) | card_bit(b)) == 0)
+                        .map(|(i, &(a, b))| {
+                            cards[5] = a;
+                            cards[6] = b;
+                            SdHand { strength: evaluate(&cards), idx: i as u32, c1: a, c2: b }
                         })
                         .collect();
-                    let mut order: Vec<u32> = (0..hands[p].len() as u32)
-                        .filter(|&i| {
-                            let (a, b) = hands[p][i as usize];
-                            mask & (card_bit(a) | card_bit(b)) == 0
-                        })
-                        .collect();
-                    order.sort_by_key(|&i| strength[i as usize]);
-                    data.strength[p] = strength;
-                    data.order[p] = order;
+                    v.sort_by_key(|x| x.strength);
+                    data.sorted[p] = v;
                 }
                 data
             })
@@ -244,71 +242,67 @@ impl Game {
             self.starting_pot() + node.commits[folder]
         };
         let (total, per_card) = self.reach_sums(1 - p, reach);
+        if total <= 0.0 {
+            return vec![0.0; self.hands[p].len()];
+        }
         (0..self.hands[p].len())
             .map(|h| (payoff * self.compatible(p, h, reach, total, &per_card)) as f32)
             .collect()
     }
 
-    /// 쇼다운 가치. 강도순 정렬 + 누적합으로 O(n)
+    /// 쇼다운 가치. 강도순 정렬 + 누적합으로 O(n).
+    /// 가치 = 무승부 지급 × 겹치지 않는 상대 + (이김 − 무승부) × 약한 상대 + (짐 − 무승부) × 강한 상대
     fn showdown_value(&self, node: &tree::Node, p: usize, reach: &[f32]) -> Vec<f32> {
         let o = 1 - p;
-        let sd = &self.showdowns[node.showdown_id as usize];
-        let win_pay = self.starting_pot() + node.commits[o];
-        let lose_pay = -node.commits[p];
-        let tie_pay = self.starting_pot() / 2.0;
-
         let n = self.hands[p].len();
-        let (my_order, opp_order) = (&sd.order[p], &sd.order[o]);
-        let (my_str, opp_str) = (&sd.strength[p], &sd.strength[o]);
-        let mut win = vec![0.0f64; n];
-        let mut lose = vec![0.0f64; n];
+        let (total, per_card) = self.reach_sums(o, reach);
+        if total <= 0.0 {
+            return vec![0.0f32; n];
+        }
+        // f64로 모아서 마지막에 한 번만 f32로 (정밀도)
+        let mut acc = vec![0.0f64; n];
+        let sd = &self.showdowns[node.showdown_id as usize];
+        let tie_pay = self.starting_pot() / 2.0;
+        let win_extra = self.starting_pot() + node.commits[o] - tie_pay;
+        let lose_extra = -node.commits[p] - tie_pay;
+        let (mine, opp) = (&sd.sorted[p], &sd.sorted[o]);
 
-        // 이기는 쪽: 나보다 약한 상대 reach 누적 (오름차순)
-        let mut cum = 0.0;
+        // 약한 상대 reach 누적 (오름차순)
+        let mut cum = 0.0f64;
         let mut cum_card = [0.0f64; 52];
         let mut j = 0;
-        for &h in my_order {
-            let s = my_str[h as usize];
-            while j < opp_order.len() && opp_str[opp_order[j] as usize] < s {
-                let oi = opp_order[j] as usize;
-                let (a, b) = self.hands[o][oi];
-                let r = reach[oi] as f64;
+        for m in mine {
+            while j < opp.len() && opp[j].strength < m.strength {
+                let x = &opp[j];
+                let r = reach[x.idx as usize] as f64;
                 cum += r;
-                cum_card[a as usize] += r;
-                cum_card[b as usize] += r;
+                cum_card[x.c1 as usize] += r;
+                cum_card[x.c2 as usize] += r;
                 j += 1;
             }
-            let (a, b) = self.hands[p][h as usize];
-            win[h as usize] = cum - cum_card[a as usize] - cum_card[b as usize];
+            let h = m.idx as usize;
+            let win = cum - cum_card[m.c1 as usize] - cum_card[m.c2 as usize];
+            let compat = self.compatible(p, h, reach, total, &per_card);
+            acc[h] = compat * tie_pay + win * win_extra;
         }
 
-        // 지는 쪽: 나보다 강한 상대 reach 누적 (내림차순)
-        let mut cum = 0.0;
+        // 강한 상대 reach 누적 (내림차순)
+        let mut cum = 0.0f64;
         let mut cum_card = [0.0f64; 52];
-        let mut j = opp_order.len();
-        for &h in my_order.iter().rev() {
-            let s = my_str[h as usize];
-            while j > 0 && opp_str[opp_order[j - 1] as usize] > s {
-                let oi = opp_order[j - 1] as usize;
-                let (a, b) = self.hands[o][oi];
-                let r = reach[oi] as f64;
+        let mut j = opp.len();
+        for m in mine.iter().rev() {
+            while j > 0 && opp[j - 1].strength > m.strength {
+                let x = &opp[j - 1];
+                let r = reach[x.idx as usize] as f64;
                 cum += r;
-                cum_card[a as usize] += r;
-                cum_card[b as usize] += r;
+                cum_card[x.c1 as usize] += r;
+                cum_card[x.c2 as usize] += r;
                 j -= 1;
             }
-            let (a, b) = self.hands[p][h as usize];
-            lose[h as usize] = cum - cum_card[a as usize] - cum_card[b as usize];
+            let lose = cum - cum_card[m.c1 as usize] - cum_card[m.c2 as usize];
+            acc[m.idx as usize] += lose * lose_extra;
         }
-
-        let (total, per_card) = self.reach_sums(o, reach);
-        let mut out = vec![0.0f32; n];
-        for &h in my_order {
-            let h = h as usize;
-            let tie = self.compatible(p, h, reach, total, &per_card) - win[h] - lose[h];
-            out[h] = (win[h] * win_pay + lose[h] * lose_pay + tie * tie_pay) as f32;
-        }
-        out
+        acc.into_iter().map(|x| x as f32).collect()
     }
 
     /// 찬스 노드에서 카드 한 장이 나올 확률 (양쪽 핸드 4장을 뺀 남은 덱 기준)
@@ -1095,5 +1089,52 @@ mod tests {
         let full = Game::with_isomorphism(&sym, false).unwrap().tree.nodes.len();
         assert!(a < full);
         assert_eq!(b, full);
+    }
+
+    /// O(n) 쇼다운 계산 = 모든 콤보 쌍을 직접 비교한 결과
+    #[test]
+    fn showdown_matches_brute_force() {
+        let tree = TreeConfig::uniform(10.0, 50.0, &[0.5], &[]);
+        let cfg = config("Kh 9d 4c 2s 2h", "22+,A2s+,K5s+,QTs+,A9o+,KJo", "33+,A4s+,K9s+,QJs,ATo+", tree);
+        let g = Game::new(&cfg).unwrap();
+        let board = parse_cards("Kh 9d 4c 2s 2h").unwrap();
+        let strength = |a: Card, b: Card| {
+            let mut c = board.clone();
+            c.extend([a, b]);
+            evaluate(&c)
+        };
+        let mut seed = 7u64;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % 1000) as f32 / 1000.0
+        };
+        for node in g.tree.nodes.iter().filter(|n| n.kind == NodeKind::Showdown) {
+            for p in 0..2 {
+                let o = 1 - p;
+                let reach: Vec<f32> = (0..g.hands[o].len()).map(|_| rnd()).collect();
+                let fast = g.showdown_value(node, p, &reach);
+                for (h, &(a, b)) in g.hands[p].iter().enumerate() {
+                    let my = strength(a, b);
+                    let mut want = 0.0f64;
+                    for (j, &(c, d)) in g.hands[o].iter().enumerate() {
+                        if [c, d].iter().any(|x| *x == a || *x == b) {
+                            continue;
+                        }
+                        let opp = strength(c, d);
+                        let pay = if my > opp {
+                            g.starting_pot() + node.commits[o]
+                        } else if my < opp {
+                            -node.commits[p]
+                        } else {
+                            g.starting_pot() / 2.0
+                        };
+                        want += pay * reach[j] as f64;
+                    }
+                    assert!((fast[h] as f64 - want).abs() < 1e-3 * want.abs().max(1.0), "{} {} vs {want}", h, fast[h]);
+                }
+            }
+        }
     }
 }
