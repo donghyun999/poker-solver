@@ -513,7 +513,9 @@ impl View {
                     rscale.slice(id as usize, 1)[0] = m;
                     let inv = if m > 0.0 { i16::MAX as f32 / m } else { 0.0 };
                     for (q, &x) in regrets.slice(off, v.len()).iter_mut().zip(v) {
-                        *q = (x * inv).round() as i16;
+                        // 반올림: 0.5를 부호대로 더하고 버림 (round()보다 빠르고 SIMD로 컴파일됨)
+                        let y = x * inv;
+                        *q = (y + 0.5f32.copysign(y)) as i16;
                     }
                 }
             }
@@ -541,7 +543,7 @@ impl View {
                     sscale.slice(id as usize, 1)[0] = m;
                     let inv = if m > 0.0 { u16::MAX as f32 / m } else { 0.0 };
                     for (q, &x) in strat.slice(off, v.len()).iter_mut().zip(v) {
-                        *q = (x * inv).round() as u16;
+                        *q = (x * inv + 0.5) as u16;
                     }
                 }
             }
