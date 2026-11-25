@@ -549,6 +549,65 @@ impl View {
     }
 }
 
+/// 노드 데이터 작업 버퍼: F32 저장소는 그 자리를 그대로 빌리고(복사 없음), C16은 풀어서 복사본을 쓴다
+enum Buf<'a> {
+    Slot(&'a mut [f32]),
+    Owned(Vec<f32>),
+}
+
+impl std::ops::Deref for Buf<'_> {
+    type Target = [f32];
+    fn deref(&self) -> &[f32] {
+        match self {
+            Buf::Slot(s) => s,
+            Buf::Owned(v) => v,
+        }
+    }
+}
+
+impl std::ops::DerefMut for Buf<'_> {
+    fn deref_mut(&mut self) -> &mut [f32] {
+        match self {
+            Buf::Slot(s) => s,
+            Buf::Owned(v) => v,
+        }
+    }
+}
+
+impl View {
+    /// SAFETY: load_regrets와 같음. 반환된 버퍼가 살아 있는 동안 이 구간을 다른 곳에서 쓰면 안 된다
+    unsafe fn regrets_buf<'a>(self, id: u32, off: usize, len: usize) -> Buf<'a> {
+        unsafe {
+            match self {
+                View::F32 { regrets, .. } => Buf::Slot(regrets.slice(off, len)),
+                View::C16 { .. } => Buf::Owned(self.load_regrets(id, off, len)),
+            }
+        }
+    }
+
+    unsafe fn strat_buf<'a>(self, id: u32, off: usize, len: usize) -> Buf<'a> {
+        unsafe {
+            match self {
+                View::F32 { strat, .. } => Buf::Slot(strat.slice(off, len)),
+                View::C16 { .. } => Buf::Owned(self.load_strat(id, off, len)),
+            }
+        }
+    }
+
+    /// 복사본이면 저장소에 다시 쓴다 (F32는 이미 제자리)
+    unsafe fn commit_regrets(self, id: u32, off: usize, b: Buf) {
+        if let Buf::Owned(v) = b {
+            unsafe { self.save_regrets(id, off, &v) }
+        }
+    }
+
+    unsafe fn commit_strat(self, id: u32, off: usize, b: Buf) {
+        if let Buf::Owned(v) = b {
+            unsafe { self.save_strat(id, off, &v) }
+        }
+    }
+}
+
 struct Ctx<'a> {
     game: &'a Game,
     store: View,
@@ -585,7 +644,7 @@ fn cfr(ctx: &Ctx, id: u32, reach: &[f32]) -> Vec<f32> {
             let n = g.hands[p].len();
             let k = node.actions.len();
             // SAFETY: 이 노드의 구간은 이 순회에서 여기서만 접근
-            let mut regrets = unsafe { ctx.store.load_regrets(id, node.data_offset, k * n) };
+            let mut regrets = unsafe { ctx.store.regrets_buf(id, node.data_offset, k * n) };
             let strategy = regret_matching(&regrets, k, n);
             let child_vals: Vec<Vec<f32>> = if g.subtree[id as usize] > PAR_SUBTREE {
                 node.children.par_iter().map(|&c| cfr(ctx, c, reach)).collect()
@@ -606,34 +665,35 @@ fn cfr(ctx: &Ctx, id: u32, reach: &[f32]) -> Vec<f32> {
                     *r = *r * disc + (v - e);
                 }
             }
-            unsafe { ctx.store.save_regrets(id, node.data_offset, &regrets) };
+            unsafe { ctx.store.commit_regrets(id, node.data_offset, regrets) };
             ev
         }
         NodeKind::Action => {
             // 상대 노드: 상대 전략으로 reach를 나눠 내려보내고, 상대의 평균 전략을 누적
             let n = g.hands[o].len();
             let k = node.actions.len();
-            let regrets = unsafe { ctx.store.load_regrets(id, node.data_offset, k * n) };
-            let strategy = regret_matching(&regrets, k, n);
-            let mut ss = unsafe { ctx.store.load_strat(id, node.data_offset, k * n) };
+            let mut strategy = {
+                let regrets = unsafe { ctx.store.regrets_buf(id, node.data_offset, k * n) };
+                regret_matching(&regrets, k, n)
+            };
+            let mut ss = unsafe { ctx.store.strat_buf(id, node.data_offset, k * n) };
             let gamma = ctx.d.strat;
             for (ssrow, srow) in ss.chunks_exact_mut(n).zip(strategy.chunks_exact(n)) {
                 for ((x, &sv), &r) in ssrow.iter_mut().zip(srow).zip(reach) {
                     *x = *x * gamma + sv * r;
                 }
             }
-            unsafe { ctx.store.save_strat(id, node.data_offset, &ss) };
-            // 액션별 reach는 ss 버퍼를 재사용 (저장 끝났으므로)
-            let child = |((&c, srow), r): ((&u32, &[f32]), &mut [f32])| {
-                for ((x, &sv), &rh) in r.iter_mut().zip(srow).zip(reach) {
-                    *x = rh * sv;
+            unsafe { ctx.store.commit_strat(id, node.data_offset, ss) };
+            // 전략 버퍼를 제자리에서 액션별 reach(= 상대 reach × 전략)로 바꿔 재사용
+            for row in strategy.chunks_exact_mut(n) {
+                for (x, &rh) in row.iter_mut().zip(reach) {
+                    *x *= rh;
                 }
-                cfr(ctx, c, r)
-            };
+            }
             let vals: Vec<Vec<f32>> = if g.subtree[id as usize] > PAR_SUBTREE {
-                node.children.par_iter().zip(strategy.par_chunks_exact(n)).zip(ss.par_chunks_exact_mut(n)).map(child).collect()
+                node.children.par_iter().zip(strategy.par_chunks_exact(n)).map(|(&c, r)| cfr(ctx, c, r)).collect()
             } else {
-                node.children.iter().zip(strategy.chunks_exact(n)).zip(ss.chunks_exact_mut(n)).map(child).collect()
+                node.children.iter().zip(strategy.chunks_exact(n)).map(|(&c, r)| cfr(ctx, c, r)).collect()
             };
             let mut out = vec![0.0f32; g.hands[p].len()];
             for v in vals {
