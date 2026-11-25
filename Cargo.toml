@@ -4,7 +4,7 @@ members = ["engine", "cli", "learning/kuhn", "app/src-tauri"]
 
 [workspace.package]
 edition = "2024"
-version = "0.1.0"
+version = "0.2.0"
 
 # 테스트도 최적화해서 빌드 (솔버 테스트는 최적화 없으면 수십 배 느림)
 [profile.test]

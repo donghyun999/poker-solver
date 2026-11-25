@@ -87,6 +87,17 @@ pub enum NodeKind {
     Showdown,
 }
 
+/// 수트 동형 카드: `card`가 나온 상황 = `cards[canon]`이 나온 상황에서 수트 `swap.0`과 `swap.1`을 맞바꾼 것
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IsoCard {
+    pub card: Card,
+    pub canon: u32,
+    pub swap: (u8, u8),
+}
+
+/// `sym[a][b]` = 양쪽 레인지가 수트 a↔b 교환에 대해 대칭인가
+pub type SuitSymmetry = [[bool; 4]; 4];
+
 #[derive(Clone, Debug)]
 pub struct Node {
     pub kind: NodeKind,
@@ -98,8 +109,10 @@ pub struct Node {
     pub board: u64,
     /// Action 노드: 선택지 (children과 같은 순서)
     pub actions: Vec<Action>,
-    /// Chance 노드: 딜되는 카드 (children과 같은 순서)
+    /// Chance 노드: 딜되는 카드 (children과 같은 순서). 수트 동형성이 있으면 대표 카드만
     pub cards: Vec<Card>,
+    /// Chance 노드: 대표 카드와 수트만 바꾼 관계라 하위 트리를 공유하는 카드
+    pub iso: Vec<IsoCard>,
     pub children: Vec<u32>,
     /// Action 노드: regret/전략 저장소에서 이 노드 데이터 시작 위치 (솔버가 채움)
     pub data_offset: usize,
@@ -117,6 +130,7 @@ impl Node {
             board: st.board,
             actions: Vec::new(),
             cards: Vec::new(),
+            iso: Vec::new(),
             children: Vec::new(),
             data_offset: 0,
             showdown_id: u32::MAX,
@@ -163,7 +177,14 @@ struct State {
     last_inc: f64,
 }
 
+/// 수트 동형성 없이 모든 카드를 펼친 트리
 pub fn build(config: &TreeConfig, board: &[Card]) -> Result<Tree, String> {
+    build_with_symmetry(config, board, &[[false; 4]; 4])
+}
+
+/// 찬스 노드에서, 레인지가 대칭이고 보드에서 랭크 구성이 같은 두 수트의 카드는
+/// 대표 카드(낮은 수트) 하나만 하위 트리를 만든다.
+pub fn build_with_symmetry(config: &TreeConfig, board: &[Card], sym: &SuitSymmetry) -> Result<Tree, String> {
     if !(3..=5).contains(&board.len()) {
         return Err("보드는 3~5장이어야 함".into());
     }
@@ -175,7 +196,7 @@ pub fn build(config: &TreeConfig, board: &[Card]) -> Result<Tree, String> {
         return Err("사이즈는 0보다 커야 함".into());
     }
 
-    let mut b = Builder { cfg: config, nodes: Vec::new() };
+    let mut b = Builder { cfg: config, sym: *sym, nodes: Vec::new() };
     let st = State {
         street: (board.len() - 3) as u8,
         commits: [0.0; 2],
@@ -191,6 +212,7 @@ pub fn build(config: &TreeConfig, board: &[Card]) -> Result<Tree, String> {
 
 struct Builder<'a> {
     cfg: &'a TreeConfig,
+    sym: SuitSymmetry,
     nodes: Vec<Node>,
 }
 
@@ -309,10 +331,20 @@ impl Builder<'_> {
 
     fn chance(&mut self, st: State) -> u32 {
         let id = self.push(Node::new(NodeKind::Chance, &st));
+        let ranks: Vec<u16> = (0..4).map(|s| suit_ranks(st.board, s)).collect();
         let mut cards = Vec::new();
         let mut children = Vec::new();
+        let mut iso = Vec::new();
         for c in 0..NUM_CARDS as Card {
             if st.board & card_bit(c) != 0 {
+                continue;
+            }
+            // 대표 수트: 바꿔도 같은 상황이 되는 가장 낮은 수트
+            let s = suit(c);
+            if let Some(t) = (0..s).find(|&t| self.sym[t as usize][s as usize] && ranks[t as usize] == ranks[s as usize]) {
+                let rep = make_card(rank(c), t);
+                let canon = cards.iter().position(|&x| x == rep).expect("대표 카드가 먼저 만들어짐") as u32;
+                iso.push(IsoCard { card: c, canon, swap: (t, s) });
                 continue;
             }
             let ns = State {
@@ -330,6 +362,7 @@ impl Builder<'_> {
         }
         let node = &mut self.nodes[id as usize];
         node.cards = cards;
+        node.iso = iso;
         node.children = children;
         id
     }
@@ -386,6 +419,30 @@ mod tests {
         let chance = t.nodes.iter().find(|n| n.kind == NodeKind::Chance).unwrap();
         assert_eq!(chance.children.len(), 48);
         assert_eq!(t.count(NodeKind::Showdown), 48);
+    }
+
+    #[test]
+    fn suit_isomorphism_on_two_tone_flop() {
+        let mut cfg = TreeConfig::uniform(10.0, 100.0, &[], &[]);
+        cfg.allow_allin = false;
+        let board = parse_cards("Kh 9h 4c").unwrap();
+        // d<->s 교환만 대칭이라고 가정
+        let mut sym = [[false; 4]; 4];
+        sym[1][3] = true;
+        sym[3][1] = true;
+        let full = build(&cfg, &board).unwrap();
+        let reduced = build_with_symmetry(&cfg, &board, &sym).unwrap();
+        // 턴: d와 s는 둘 다 보드에 없음 → s 13장은 d로 대체 (49 → 36)
+        let turn = &reduced.nodes[reduced.nodes.iter().position(|n| n.kind == NodeKind::Chance).unwrap()];
+        assert_eq!(turn.cards.len() + turn.iso.len(), 49);
+        assert_eq!(turn.cards.len(), 36);
+        assert!(turn.iso.iter().all(|i| suit(i.card) == 3 && i.swap == (1, 3)));
+        assert!(reduced.nodes.len() < full.nodes.len());
+        // 레인지가 대칭이 아니면 줄이지 않음
+        sym[1][3] = false;
+        sym[3][1] = false;
+        let none = build_with_symmetry(&cfg, &board, &sym).unwrap();
+        assert_eq!(none.nodes.len(), full.nodes.len());
     }
 
     #[test]

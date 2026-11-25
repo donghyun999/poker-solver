@@ -36,6 +36,7 @@ const HELP: &str = "\
   --threads <n>       스레드 수 (기본: 전체 코어)
   --max-mem <GB>      메모리 상한 (기본 8)
   --compress          16비트 압축 저장 (메모리 약 절반, 플랍 추천)
+  --no-iso            수트 동형성 끄기 (비교용. 기본: 레인지가 대칭이면 자동 사용)
 
 저장/불러오기
   --save <파일>       솔브 결과를 파일로 저장
@@ -57,7 +58,7 @@ impl Args {
             let Some(name) = key.strip_prefix("--") else {
                 return Err(format!("알 수 없는 인자: {key}"));
             };
-            let flag = matches!(name, "no-allin" | "help" | "compress");
+            let flag = matches!(name, "no-allin" | "help" | "compress" | "no-iso");
             let val = if flag { String::new() } else { it.next().ok_or(format!("{key} 값이 없음"))? };
             map.insert(name.to_string(), val);
         }
@@ -238,7 +239,7 @@ fn run() -> Result<(), String> {
 
     let compress = args.get("compress").is_some();
     let t0 = std::time::Instant::now();
-    let game = Game::new(&cfg)?;
+    let game = Game::with_isomorphism(&cfg, args.get("no-iso").is_none())?;
     let mem = game.memory_bytes(compress) as f64;
     let t = &game.tree;
     println!(

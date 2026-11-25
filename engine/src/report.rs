@@ -40,19 +40,25 @@ pub struct NodeSummary {
 impl Solver {
     pub fn summarize(&self, path: &[Step]) -> Result<NodeSummary, String> {
         let g = &self.game;
-        let (id, reach) = self.walk(path)?;
+        let w = self.walk_full(path)?;
+        let (id, reach) = (w.node, w.reach);
         let node = &g.tree.nodes[id as usize];
+        let board_mask = mask_of(&w.board);
         let mut out = NodeSummary {
             node: id,
             kind: node.kind,
             player: node.player,
-            board: board_cards(&g.config.board, node.board),
+            board: w.board.clone(),
             pot: g.tree.pot(id),
             actions: node.actions.iter().map(|a| a.label()).collect(),
             overall: Vec::new(),
             total_combos: 0.0,
             classes: Vec::new(),
-            dealable: if node.kind == NodeKind::Chance { node.cards.clone() } else { Vec::new() },
+            dealable: if node.kind == NodeKind::Chance {
+                (0..NUM_CARDS as Card).filter(|&c| board_mask & card_bit(c) == 0).collect()
+            } else {
+                Vec::new()
+            },
         };
         if node.kind != NodeKind::Action {
             return Ok(out);
@@ -148,15 +154,4 @@ mod tests {
         assert_eq!(fold.kind, NodeKind::Fold);
         assert_eq!(fold.board.len(), 5);
     }
-}
-
-/// 루트 보드 순서를 유지하고, 이후 딜된 카드를 뒤에 붙인다
-fn board_cards(root: &[Card], mask: u64) -> Vec<Card> {
-    let mut v = root.to_vec();
-    for c in 0..52u8 {
-        if mask & card_bit(c) != 0 && !root.contains(&c) {
-            v.push(c);
-        }
-    }
-    v
 }

@@ -34,6 +34,38 @@ pub fn card_bit(c: Card) -> u64 {
     1u64 << c
 }
 
+/// 수트 a와 b를 맞바꾼 카드 (다른 수트는 그대로)
+#[inline]
+pub fn swap_suit(c: Card, a: u8, b: u8) -> Card {
+    let s = suit(c);
+    if s == a {
+        make_card(rank(c), b)
+    } else if s == b {
+        make_card(rank(c), a)
+    } else {
+        c
+    }
+}
+
+/// 수트 쌍 (a<b) → 0~5 번호
+#[inline]
+pub fn suit_pair_id(a: u8, b: u8) -> usize {
+    let (a, b) = if a < b { (a, b) } else { (b, a) };
+    [[9, 0, 1, 2], [9, 9, 3, 4], [9, 9, 9, 5]][a as usize][b as usize]
+}
+
+/// 보드 마스크에서 수트 s에 있는 랭크 집합 (13비트)
+#[inline]
+pub fn suit_ranks(board: u64, s: u8) -> u16 {
+    let mut m = 0u16;
+    for r in 0..13u8 {
+        if board & card_bit(make_card(r, s)) != 0 {
+            m |= 1 << r;
+        }
+    }
+    m
+}
+
 pub fn parse_rank(ch: char) -> Option<u8> {
     let up = ch.to_ascii_uppercase() as u8;
     RANK_CHARS.iter().position(|&r| r == up).map(|i| i as u8)

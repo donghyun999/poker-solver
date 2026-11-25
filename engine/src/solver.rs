@@ -17,7 +17,7 @@
 use crate::card::*;
 use crate::eval::evaluate;
 use crate::range::Range;
-use crate::tree::{self, NodeKind, Tree, TreeConfig};
+use crate::tree::{self, NodeKind, SuitSymmetry, Tree, TreeConfig};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,13 +51,39 @@ pub struct Game {
     pub init_weights: [Vec<f32>; 2],
     /// 상대 목록에서 같은 콤보의 인덱스 (없으면 NONE)
     same_hand: [Vec<u32>; 2],
+    /// [플레이어][수트 쌍 번호] → 콤보 h의 수트를 바꾼 콤보 인덱스 (대칭인 쌍만 채움)
+    swap_map: [Vec<Vec<u32>>; 2],
     showdowns: Vec<ShowdownData>,
     storage_len: usize,
 }
 
+/// 양쪽 레인지가 수트 a<->b 교환에 대칭인지
+fn range_symmetry(ranges: &[Range; 2]) -> SuitSymmetry {
+    let mut sym = [[false; 4]; 4];
+    for a in 0..4u8 {
+        for b in a + 1..4u8 {
+            let ok = ranges.iter().all(|r| {
+                (0..NUM_COMBOS).all(|i| {
+                    let (x, y) = combo_cards(i);
+                    r.weights[i] == r.weights[combo_index(swap_suit(x, a, b), swap_suit(y, a, b))]
+                })
+            });
+            sym[a as usize][b as usize] = ok;
+            sym[b as usize][a as usize] = ok;
+        }
+    }
+    sym
+}
+
 impl Game {
+    /// 수트 동형성 사용 (레인지가 대칭인 경우 자동)
     pub fn new(cfg: &SolveConfig) -> Result<Game, String> {
-        let mut tree = tree::build(&cfg.tree, &cfg.board)?;
+        Self::with_isomorphism(cfg, true)
+    }
+
+    pub fn with_isomorphism(cfg: &SolveConfig, isomorphism: bool) -> Result<Game, String> {
+        let sym = if isomorphism { range_symmetry(&cfg.ranges) } else { [[false; 4]; 4] };
+        let mut tree = tree::build_with_symmetry(&cfg.tree, &cfg.board, &sym)?;
         let board_mask = mask_of(&cfg.board);
 
         let mut hands: [Vec<(Card, Card)>; 2] = Default::default();
@@ -84,6 +110,25 @@ impl Game {
                 pos[combo_index(a, b)] = i as u32;
             }
             same_hand[p] = hands[p].iter().map(|&(a, b)| pos[combo_index(a, b)]).collect();
+        }
+
+        let mut swap_map: [Vec<Vec<u32>>; 2] = Default::default();
+        for p in 0..2 {
+            let mut pos = vec![NONE; NUM_COMBOS];
+            for (i, &(a, b)) in hands[p].iter().enumerate() {
+                pos[combo_index(a, b)] = i as u32;
+            }
+            swap_map[p] = vec![Vec::new(); 6];
+            for a in 0..4u8 {
+                for b in a + 1..4u8 {
+                    if sym[a as usize][b as usize] {
+                        swap_map[p][suit_pair_id(a, b)] = hands[p]
+                            .iter()
+                            .map(|&(x, y)| pos[combo_index(swap_suit(x, a, b), swap_suit(y, a, b))])
+                            .collect();
+                    }
+                }
+            }
         }
 
         // 액션 노드 데이터 위치, 쇼다운 보드 번호 배정
@@ -142,7 +187,7 @@ impl Game {
             })
             .collect();
 
-        Ok(Game { config: cfg.clone(), tree, hands, init_weights, same_hand, showdowns, storage_len: offset })
+        Ok(Game { config: cfg.clone(), tree, hands, init_weights, same_hand, swap_map, showdowns, storage_len: offset })
     }
 
     pub fn starting_pot(&self) -> f64 {
@@ -271,6 +316,30 @@ impl Game {
         1.0 / (52 - node.board.count_ones() as i32 - 4) as f32
     }
 
+    /// 찬스 노드: 대표 카드별 가치(results, 카드 겹침 0 처리됨) + 수트 동형 카드 -> 확률 가중 평균
+    fn chance_sum(&self, node: &tree::Node, p: usize, results: Vec<Vec<f32>>) -> Vec<f32> {
+        let n = self.hands[p].len();
+        let mut out = vec![0.0f32; n];
+        for v in &results {
+            for (x, y) in out.iter_mut().zip(v) {
+                *x += y;
+            }
+        }
+        for iso in &node.iso {
+            // 수트를 바꾼 상황: 콤보 h의 가치 = 대표 카드 상황에서 h의 수트를 바꾼 콤보의 가치
+            let v = &results[iso.canon as usize];
+            let map = &self.swap_map[p][suit_pair_id(iso.swap.0, iso.swap.1)];
+            for (x, &m) in out.iter_mut().zip(map) {
+                if m != NONE {
+                    *x += v[m as usize];
+                }
+            }
+        }
+        let f = self.chance_factor(node);
+        out.iter_mut().for_each(|x| *x *= f);
+        out
+    }
+
     fn zero_conflicts(&self, p: usize, card: Card, v: &mut [f32]) {
         for (i, &(a, b)) in self.hands[p].iter().enumerate() {
             if a == card || b == card {
@@ -287,12 +356,19 @@ fn regret_matching(regrets: &[f32], k: usize, n: usize) -> Vec<f32> {
     s
 }
 
-/// [액션 × 콤보] 배열에서 콤보별로 액션 합이 1이 되게
+/// [액션 × 콤보] 배열에서 콤보별로 액션 합이 1이 되게 (합이 0이면 균등).
+/// 액션 행 단위로 연속 메모리를 훑어서 SIMD로 컴파일되게 한다.
 fn normalize_columns(s: &mut [f32], k: usize, n: usize) {
-    for h in 0..n {
-        let sum: f32 = (0..k).map(|a| s[a * n + h]).sum();
-        for a in 0..k {
-            s[a * n + h] = if sum > 0.0 { s[a * n + h] / sum } else { 1.0 / k as f32 };
+    let mut sum = vec![0.0f32; n];
+    for row in s.chunks_exact(n).take(k) {
+        for (t, &x) in sum.iter_mut().zip(row) {
+            *t += x;
+        }
+    }
+    let uniform = 1.0 / k as f32;
+    for row in s.chunks_exact_mut(n).take(k) {
+        for (x, &t) in row.iter_mut().zip(&sum) {
+            *x = if t > 0.0 { *x / t } else { uniform };
         }
     }
 }
@@ -487,7 +563,7 @@ fn cfr(ctx: &Ctx, id: u32, reach: &[f32]) -> Vec<f32> {
                     v
                 })
                 .collect();
-            sum_scaled(results, g.hands[p].len(), g.chance_factor(node))
+            g.chance_sum(node, p, results)
         }
         NodeKind::Action if node.player as usize == p => {
             let n = g.hands[p].len();
@@ -498,17 +574,16 @@ fn cfr(ctx: &Ctx, id: u32, reach: &[f32]) -> Vec<f32> {
             let child_vals: Vec<Vec<f32>> = node.children.iter().map(|&c| cfr(ctx, c, reach)).collect();
 
             let mut ev = vec![0.0f32; n];
-            for a in 0..k {
-                for h in 0..n {
-                    ev[h] += strategy[a * n + h] * child_vals[a][h];
+            for (srow, cv) in strategy.chunks_exact(n).zip(&child_vals) {
+                for ((e, &sv), &v) in ev.iter_mut().zip(srow).zip(cv) {
+                    *e += sv * v;
                 }
             }
-            for a in 0..k {
-                for h in 0..n {
-                    let i = a * n + h;
-                    let r = regrets[i];
-                    let disc = if r >= 0.0 { ctx.d.pos } else { ctx.d.neg };
-                    regrets[i] = r * disc + (child_vals[a][h] - ev[h]);
+            let (pos, neg) = (ctx.d.pos, ctx.d.neg);
+            for (rrow, cv) in regrets.chunks_exact_mut(n).zip(&child_vals) {
+                for ((r, &v), &e) in rrow.iter_mut().zip(cv).zip(&ev) {
+                    let disc = if *r >= 0.0 { pos } else { neg };
+                    *r = *r * disc + (v - e);
                 }
             }
             unsafe { ctx.store.save_regrets(id, node.data_offset, &regrets) };
@@ -521,34 +596,26 @@ fn cfr(ctx: &Ctx, id: u32, reach: &[f32]) -> Vec<f32> {
             let regrets = unsafe { ctx.store.load_regrets(id, node.data_offset, k * n) };
             let strategy = regret_matching(&regrets, k, n);
             let mut ss = unsafe { ctx.store.load_strat(id, node.data_offset, k * n) };
-            for a in 0..k {
-                for h in 0..n {
-                    let i = a * n + h;
-                    ss[i] = ss[i] * ctx.d.strat + strategy[i] * reach[h];
+            let gamma = ctx.d.strat;
+            for (ssrow, srow) in ss.chunks_exact_mut(n).zip(strategy.chunks_exact(n)) {
+                for ((x, &sv), &r) in ssrow.iter_mut().zip(srow).zip(reach) {
+                    *x = *x * gamma + sv * r;
                 }
             }
             unsafe { ctx.store.save_strat(id, node.data_offset, &ss) };
+            // 액션별 reach는 ss 버퍼를 재사용 (저장 끝났으므로)
             let mut out = vec![0.0f32; g.hands[p].len()];
-            for (a, &child) in node.children.iter().enumerate() {
-                let r: Vec<f32> = (0..n).map(|h| reach[h] * strategy[a * n + h]).collect();
-                for (x, v) in out.iter_mut().zip(cfr(ctx, child, &r)) {
+            for ((&child, srow), r) in node.children.iter().zip(strategy.chunks_exact(n)).zip(ss.chunks_exact_mut(n)) {
+                for ((x, &sv), &rh) in r.iter_mut().zip(srow).zip(reach) {
+                    *x = rh * sv;
+                }
+                for (x, v) in out.iter_mut().zip(cfr(ctx, child, r)) {
                     *x += v;
                 }
             }
             out
         }
     }
-}
-
-fn sum_scaled(vs: Vec<Vec<f32>>, n: usize, factor: f32) -> Vec<f32> {
-    let mut out = vec![0.0f32; n];
-    for v in vs {
-        for (x, y) in out.iter_mut().zip(v) {
-            *x += y;
-        }
-    }
-    out.iter_mut().for_each(|x| *x *= factor);
-    out
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -668,7 +735,7 @@ impl Solver {
                         v
                     })
                     .collect();
-                sum_scaled(results, g.hands[p].len(), g.chance_factor(node))
+                g.chance_sum(node, p, results)
             }
             NodeKind::Action if node.player as usize == p => {
                 let n = g.hands[p].len();
@@ -734,9 +801,18 @@ impl Solver {
     /// 루트에서 경로를 따라 내려가며 각 플레이어의 콤보별 도달 확률을 계산.
     /// 반환: (도착 노드, [OOP reach, IP reach]) — 초기 가중치 포함
     pub fn walk(&self, path: &[Step]) -> Result<(u32, [Vec<f32>; 2]), String> {
+        self.walk_full(path).map(|w| (w.node, w.reach))
+    }
+
+    /// `walk` + 실제 보드. 수트 동형 카드를 고르면 트리에서는 대표 카드의 하위 트리로 가고,
+    /// reach는 그 트리 기준(수트를 바꾼 콤보 순서)으로 바뀐다.
+    pub fn walk_full(&self, path: &[Step]) -> Result<Walk, String> {
         let g = &self.game;
         let mut id = g.tree.root();
         let mut reach = g.init_weights.clone();
+        let mut board = g.config.board.clone();
+        // 실제 수트 -> 트리 수트
+        let mut perm = [0u8, 1, 2, 3];
         for step in path {
             let node = &g.tree.nodes[id as usize];
             match (node.kind, *step) {
@@ -753,14 +829,30 @@ impl Solver {
                     id = node.children[a];
                 }
                 (NodeKind::Chance, Step::Card(c)) => {
-                    let pos = node
-                        .cards
-                        .iter()
-                        .position(|&x| x == c)
-                        .ok_or_else(|| format!("{}는 이미 보드에 있음", card_to_string(c)))?;
-                    for p in 0..2 {
-                        g.zero_conflicts(p, c, &mut reach[p]);
+                    if board.contains(&c) {
+                        return Err(format!("{}는 이미 보드에 있음", card_to_string(c)));
                     }
+                    let t = make_card(rank(c), perm[suit(c) as usize]);
+                    let (pos, tree_card) = match node.cards.iter().position(|&x| x == t) {
+                        Some(pos) => (pos, t),
+                        None => {
+                            let iso = node.iso.iter().find(|i| i.card == t).ok_or("카드를 찾을 수 없음")?;
+                            let (a, b) = iso.swap;
+                            for s in perm.iter_mut() {
+                                *s = if *s == a { b } else if *s == b { a } else { *s };
+                            }
+                            for p in 0..2 {
+                                let map = &g.swap_map[p][suit_pair_id(a, b)];
+                                reach[p] = map.iter().map(|&m| if m == NONE { 0.0 } else { reach[p][m as usize] }).collect();
+                            }
+                            let pos = iso.canon as usize;
+                            (pos, node.cards[pos])
+                        }
+                    };
+                    for p in 0..2 {
+                        g.zero_conflicts(p, tree_card, &mut reach[p]);
+                    }
+                    board.push(c);
                     id = node.children[pos];
                 }
                 (NodeKind::Action, Step::Card(_)) => return Err("여기는 액션 노드: 액션 번호를 입력".into()),
@@ -768,8 +860,17 @@ impl Solver {
                 _ => return Err("게임이 이미 끝난 노드".into()),
             }
         }
-        Ok((id, reach))
+        Ok(Walk { node: id, reach, board })
     }
+}
+
+/// `walk_full` 결과
+pub struct Walk {
+    pub node: u32,
+    /// 트리 기준 콤보 순서 (`game.hands`)
+    pub reach: [Vec<f32>; 2],
+    /// 실제로 고른 카드 순서의 보드
+    pub board: Vec<Card>,
 }
 
 #[cfg(test)]
@@ -925,5 +1026,74 @@ mod tests {
         }
         let avg = weighted / total_w;
         assert!((turn_ev - avg).abs() < 0.03, "턴 {turn_ev} vs 리버 평균 {avg}");
+    }
+
+    /// 투톤 이하 보드: 수트 동형성으로 트리가 줄어도 결과는 전부 펼친 트리와 같아야 한다
+    #[test]
+    fn isomorphism_matches_full_tree() {
+        let mut tree = TreeConfig::uniform(20.0, 60.0, &[0.5, 1.0], &[1.0]);
+        tree.max_raises = 1;
+        // 턴 보드에 d, s가 없음 → 리버 s 카드는 d 카드와 동형
+        let cfg = config("Kh 9h 4h 2c", "22+,A2s+,K9s+,QTs+,JTs,ATo+,KQo", "55+,A8s+,KTs+,QJs,AJo+", tree);
+        let run = |iso: bool, iters: u32| {
+            let mut s = Solver::new(Game::with_isomorphism(&cfg, iso).unwrap());
+            for _ in 0..iters {
+                s.iterate();
+            }
+            s
+        };
+
+        // 반복 전(균등 전략): 같은 전략이라 콤보별 EV·최적 대응까지 정확히 같아야 함.
+        // (반복을 돌리면 regret이 0 근처인 콤보에서 미세한 오차가 전략을 크게 바꿔 궤적이 갈라짐)
+        let (full, small) = (run(false, 0), run(true, 0));
+        assert!(small.game.tree.nodes.len() < full.game.tree.nodes.len() * 4 / 5);
+        for p in 0..2 {
+            for (x, y) in full.root_hand_evs(p).iter().zip(small.root_hand_evs(p)) {
+                assert!((x - y).abs() < 1e-3, "{x} vs {y}");
+            }
+        }
+        let (xf, xs) = (full.exploitability(), small.exploitability());
+        assert!((xf - xs).abs() < 1e-4 * xf, "exploitability {xf} vs {xs}");
+        for path in [
+            vec![Step::Action(0), Step::Action(0), Step::Card(parse_card("5s").unwrap())],
+            vec![Step::Action(0), Step::Action(0), Step::Card(parse_card("5s").unwrap()), Step::Action(1)],
+            vec![Step::Action(2), Step::Action(1), Step::Card(parse_card("As").unwrap())],
+        ] {
+            let (a, b) = (full.summarize(&path).unwrap(), small.summarize(&path).unwrap());
+            assert_eq!(a.board, b.board);
+            assert_eq!(a.actions, b.actions);
+            assert_eq!(a.dealable, b.dealable);
+            assert!((a.total_combos - b.total_combos).abs() < 1e-3);
+        }
+
+        // 수렴 후: 균형이 유일하지 않아 핸드별 빈도는 갈릴 수 있지만 EV·익스플로이터빌리티는 같다
+        let (full, small) = (run(false, 300), run(true, 300));
+        let (ef, es) = (full.expected_values(), small.expected_values());
+        assert!((ef[0] - es[0]).abs() < 1e-2, "{ef:?} vs {es:?}");
+        assert!(full.exploitability() < 0.2 && small.exploitability() < 0.2);
+
+        // 동형 트리 안에서: 5s로 가든 5d로 가든 같은 하위 트리 → 결과가 정확히 같아야 함
+        let via = |c: &str| {
+            small.summarize(&[Step::Action(0), Step::Action(0), Step::Card(parse_card(c).unwrap()), Step::Action(1)]).unwrap()
+        };
+        let (d, s) = (via("5d"), via("5s"));
+        assert_eq!(d.board.last(), Some(&parse_card("5d").unwrap()));
+        assert_eq!(s.board.last(), Some(&parse_card("5s").unwrap()));
+        assert!((d.total_combos - s.total_combos).abs() < 1e-6);
+        for (x, y) in d.overall.iter().zip(&s.overall) {
+            assert!((x - y).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn asymmetric_range_disables_isomorphism() {
+        let tree = TreeConfig::uniform(20.0, 60.0, &[1.0], &[]);
+        let sym = config("Kh 9h 4h 2c", "AA,KK", "QQ", tree.clone());
+        let asym = config("Kh 9h 4h 2c", "AA,KK,AdKd", "QQ", tree);
+        let a = Game::new(&sym).unwrap().tree.nodes.len();
+        let b = Game::new(&asym).unwrap().tree.nodes.len();
+        let full = Game::with_isomorphism(&sym, false).unwrap().tree.nodes.len();
+        assert!(a < full);
+        assert_eq!(b, full);
     }
 }
