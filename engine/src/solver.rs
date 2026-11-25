@@ -273,7 +273,7 @@ impl Game {
     }
 
     /// 쇼다운 가치. 강도순 정렬 + 누적합으로 O(n).
-    /// 가치 = 무승부 지급 × 겹치지 않는 상대 + (이김 − 무승부) × 약한 상대 + (짐 − 무승부) × 강한 상대
+    /// 가치 = 이김 지급 × 약한 상대 + 짐 지급 × 강한 상대 + 무승부 지급 × 나머지 (겹치지 않는 상대만)
     fn showdown_value(&self, node: &tree::Node, p: usize, reach: &[f32]) -> Vec<f32> {
         let o = 1 - p;
         let n = self.hands[p].len();
@@ -281,12 +281,12 @@ impl Game {
         if total <= 0.0 {
             return vec![0.0f32; n];
         }
-        // f64로 모아서 마지막에 한 번만 f32로 (정밀도)
-        let mut acc = vec![0.0f64; n];
+        // 약한 상대 reach 합 (f64로 모아서 마지막에 한 번만 f32로)
+        let mut win = vec![0.0f64; n];
         let sd = &self.showdowns[node.showdown_id as usize];
+        let win_pay = self.starting_pot() + node.commits[o];
+        let lose_pay = -node.commits[p];
         let tie_pay = self.starting_pot() / 2.0;
-        let win_extra = self.starting_pot() + node.commits[o] - tie_pay;
-        let lose_extra = -node.commits[p] - tie_pay;
         let (mine, opp) = (&sd.sorted[p], &sd.sorted[o]);
 
         // 약한 상대 reach 누적 (오름차순)
@@ -302,13 +302,11 @@ impl Game {
                 cum_card[x.c2 as usize] += r;
                 j += 1;
             }
-            let h = m.idx as usize;
-            let win = cum - cum_card[m.c1 as usize] - cum_card[m.c2 as usize];
-            let compat = self.compatible(p, h, reach, total, &per_card);
-            acc[h] = compat * tie_pay + win * win_extra;
+            win[m.idx as usize] = cum - cum_card[m.c1 as usize] - cum_card[m.c2 as usize];
         }
 
         // 강한 상대 reach 누적 (내림차순)
+        let mut out = vec![0.0f32; n];
         let mut cum = 0.0f64;
         let mut cum_card = [0.0f64; 52];
         let mut j = opp.len();
@@ -321,10 +319,12 @@ impl Game {
                 cum_card[x.c2 as usize] += r;
                 j -= 1;
             }
+            let h = m.idx as usize;
             let lose = cum - cum_card[m.c1 as usize] - cum_card[m.c2 as usize];
-            acc[m.idx as usize] += lose * lose_extra;
+            let tie = self.compatible(p, h, reach, total, &per_card) - win[h] - lose;
+            out[h] = (win[h] * win_pay + lose * lose_pay + tie * tie_pay) as f32;
         }
-        acc.into_iter().map(|x| x as f32).collect()
+        out
     }
 
     /// 찬스 노드에서 카드 한 장이 나올 확률 (양쪽 핸드 4장을 뺀 남은 덱 기준)
