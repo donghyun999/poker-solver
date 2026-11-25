@@ -62,7 +62,12 @@ pub struct Game {
     swap_map: [Vec<Vec<u32>>; 2],
     showdowns: Vec<ShowdownData>,
     storage_len: usize,
+    /// 노드별 하위 트리 크기 (노드 수). 큰 하위 트리만 액션 자식을 병렬로 계산
+    subtree: Vec<u32>,
 }
+
+/// 이보다 큰 하위 트리를 가진 액션 노드는 자식들을 병렬로 계산
+const PAR_SUBTREE: u32 = 400;
 
 /// 양쪽 레인지가 수트 a<->b 교환에 대칭인지
 fn range_symmetry(ranges: &[Range; 2]) -> SuitSymmetry {
@@ -185,7 +190,24 @@ impl Game {
             })
             .collect();
 
-        Ok(Game { config: cfg.clone(), tree, hands, init_weights, same_hand, swap_map, showdowns, storage_len: offset })
+        // 트리는 전위 순서로 저장되어 있어서, 하위 트리 = [id, 마지막 자식의 끝)
+        let mut end = vec![0u32; tree.nodes.len()];
+        for id in (0..tree.nodes.len()).rev() {
+            end[id] = tree.nodes[id].children.last().map_or(id as u32 + 1, |&c| end[c as usize]);
+        }
+        let subtree = end.iter().enumerate().map(|(i, &e)| e - i as u32).collect();
+
+        Ok(Game {
+            config: cfg.clone(),
+            tree,
+            hands,
+            init_weights,
+            same_hand,
+            swap_map,
+            showdowns,
+            storage_len: offset,
+            subtree,
+        })
     }
 
     pub fn starting_pot(&self) -> f64 {
@@ -395,7 +417,7 @@ impl<T> Clone for Ptr<T> {
 impl<T> Copy for Ptr<T> {}
 // SAFETY: 트리의 각 액션 노드는 저장소에서 겹치지 않는 구간 [offset, offset+len)과
 // 자기 노드 번호의 스케일 칸을 갖고, 한 번의 순회에서 각 노드는 정확히 한 번만 방문된다.
-// 병렬화는 서로 다른 하위 트리(찬스 노드의 자식들)로만 나뉘므로 같은 곳을 동시에 쓰는 일이 없다.
+// 병렬화는 서로 다른 하위 트리(찬스·액션 노드의 자식들)로만 나뉘므로 같은 곳을 동시에 쓰는 일이 없다.
 unsafe impl<T: Send> Send for Ptr<T> {}
 unsafe impl<T: Send> Sync for Ptr<T> {}
 
@@ -565,7 +587,11 @@ fn cfr(ctx: &Ctx, id: u32, reach: &[f32]) -> Vec<f32> {
             // SAFETY: 이 노드의 구간은 이 순회에서 여기서만 접근
             let mut regrets = unsafe { ctx.store.load_regrets(id, node.data_offset, k * n) };
             let strategy = regret_matching(&regrets, k, n);
-            let child_vals: Vec<Vec<f32>> = node.children.iter().map(|&c| cfr(ctx, c, reach)).collect();
+            let child_vals: Vec<Vec<f32>> = if g.subtree[id as usize] > PAR_SUBTREE {
+                node.children.par_iter().map(|&c| cfr(ctx, c, reach)).collect()
+            } else {
+                node.children.iter().map(|&c| cfr(ctx, c, reach)).collect()
+            };
 
             let mut ev = vec![0.0f32; n];
             for (srow, cv) in strategy.chunks_exact(n).zip(&child_vals) {
@@ -598,13 +624,21 @@ fn cfr(ctx: &Ctx, id: u32, reach: &[f32]) -> Vec<f32> {
             }
             unsafe { ctx.store.save_strat(id, node.data_offset, &ss) };
             // 액션별 reach는 ss 버퍼를 재사용 (저장 끝났으므로)
-            let mut out = vec![0.0f32; g.hands[p].len()];
-            for ((&child, srow), r) in node.children.iter().zip(strategy.chunks_exact(n)).zip(ss.chunks_exact_mut(n)) {
+            let child = |((&c, srow), r): ((&u32, &[f32]), &mut [f32])| {
                 for ((x, &sv), &rh) in r.iter_mut().zip(srow).zip(reach) {
                     *x = rh * sv;
                 }
-                for (x, v) in out.iter_mut().zip(cfr(ctx, child, r)) {
-                    *x += v;
+                cfr(ctx, c, r)
+            };
+            let vals: Vec<Vec<f32>> = if g.subtree[id as usize] > PAR_SUBTREE {
+                node.children.par_iter().zip(strategy.par_chunks_exact(n)).zip(ss.par_chunks_exact_mut(n)).map(child).collect()
+            } else {
+                node.children.iter().zip(strategy.chunks_exact(n)).zip(ss.chunks_exact_mut(n)).map(child).collect()
+            };
+            let mut out = vec![0.0f32; g.hands[p].len()];
+            for v in vals {
+                for (x, y) in out.iter_mut().zip(v) {
+                    *x += y;
                 }
             }
             out
@@ -733,7 +767,11 @@ impl Solver {
             }
             NodeKind::Action if node.player as usize == p => {
                 let n = g.hands[p].len();
-                let vals: Vec<Vec<f32>> = node.children.iter().map(|&c| self.traverse(c, p, reach, mode)).collect();
+                let vals: Vec<Vec<f32>> = if g.subtree[id as usize] > PAR_SUBTREE {
+                    node.children.par_iter().map(|&c| self.traverse(c, p, reach, mode)).collect()
+                } else {
+                    node.children.iter().map(|&c| self.traverse(c, p, reach, mode)).collect()
+                };
                 match mode {
                     Mode::BestResponse => (0..n)
                         .map(|h| vals.iter().map(|v| v[h]).fold(f32::NEG_INFINITY, f32::max))
@@ -747,11 +785,19 @@ impl Solver {
             NodeKind::Action => {
                 let n = g.hands[o].len();
                 let s = self.strategy(id);
+                let child = |(&c, srow): (&u32, &[f32])| {
+                    let r: Vec<f32> = reach.iter().zip(srow).map(|(&rh, &sv)| rh * sv).collect();
+                    self.traverse(c, p, &r, mode)
+                };
+                let vals: Vec<Vec<f32>> = if g.subtree[id as usize] > PAR_SUBTREE {
+                    node.children.par_iter().zip(s.par_chunks_exact(n)).map(child).collect()
+                } else {
+                    node.children.iter().zip(s.chunks_exact(n)).map(child).collect()
+                };
                 let mut out = vec![0.0f32; g.hands[p].len()];
-                for (a, &child) in node.children.iter().enumerate() {
-                    let r: Vec<f32> = (0..n).map(|h| reach[h] * s[a * n + h]).collect();
-                    for (x, v) in out.iter_mut().zip(self.traverse(child, p, &r, mode)) {
-                        *x += v;
+                for v in vals {
+                    for (x, y) in out.iter_mut().zip(v) {
+                        *x += y;
                     }
                 }
                 out

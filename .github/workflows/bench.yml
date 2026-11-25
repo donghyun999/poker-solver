@@ -1,0 +1,50 @@
+# PR마다 main과 PR 브랜치의 솔브 시간·결과를 같은 머신에서 비교해 요약에 표로 남긴다.
+name: bench
+
+on:
+  pull_request:
+    paths: ["engine/**", "cli/**", "Cargo.*", ".github/workflows/bench.yml"]
+  workflow_dispatch:
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: new
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: old
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build
+        run: |
+          (cd old && cargo build --release -p cli)
+          (cd new && cargo build --release -p cli)
+      - name: run
+        run: |
+          OOP="22-JJ,A2s-AJs,K2s+,Q4s+,J6s+,T6s+,95s+,85s+,74s+,63s+,53s+,43s,A2o-AJo,K8o+,Q9o+,J9o+,T8o+,98o"
+          IP="22+,A2s+,K2s+,Q5s+,J7s+,T7s+,96s+,86s+,75s+,64s+,54s,A2o+,K9o+,Q9o+,J9o+,T9o"
+          run() { # name board extra...
+            local name=$1 board=$2; shift 2
+            for v in old new; do
+              out=$(./$v/target/release/cli --board "$board" --oop "$OOP" --ip "$IP" --target 0 "$@" | grep -E "트리|완료")
+              mem=$(echo "$out" | grep -oE "메모리 [0-9.]+ MB" | grep -oE "[0-9.]+")
+              done_line=$(echo "$out" | grep "완료")
+              secs=$(echo "$done_line" | grep -oE "[0-9.]+초" | head -1)
+              expl=$(echo "$done_line" | grep -oE "익스플로이터빌리티 [0-9.]+%" | grep -oE "[0-9.]+%")
+              ev=$(echo "$done_line" | grep -oE "EV OOP [0-9.-]+" | grep -oE "[0-9.-]+$")
+              echo "| $name | $v | $mem MB | $secs | $expl | $ev |" >> rows.md
+            done
+          }
+          run "턴 레인보우 (300회)" "Kh 9d 4c 2s" --pot 20 --stack 87 --bet 33,75 --raise 100 --max-raises 2 --iters 300 --check-every 300
+          run "리버 (500회)" "Kh 9d 4c 2s 7h" --pot 40 --stack 67 --bet 33,75,150 --raise 100 --max-raises 2 --iters 500 --check-every 500
+          run "투톤 플랍 압축 (20회)" "Kh 9h 4c" --pot 6 --stack 97 --bet 33,75 --turn-bet 75 --river-bet 75 --max-raises 1 --compress --max-mem 12 --iters 20 --check-every 20
+          {
+            echo "### 벤치마크 (main → PR, $(nproc)코어)"
+            echo "| 스팟 | 빌드 | 메모리 | 시간 | 익스플로이터빌리티 | EV OOP |"
+            echo "|---|---|---|---|---|---|"
+            cat rows.md
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat rows.md
